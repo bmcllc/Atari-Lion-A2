@@ -24,6 +24,7 @@ struct Options {
   std::string image;
   long frames = -1;
   std::string dump;
+  std::string dump_ram;  // file,hexaddr,hexlen
   bool headless = false;
   int scale = 2;
   bool fast_boot = false;
@@ -31,7 +32,7 @@ struct Options {
 
 void usage() {
   std::fprintf(stderr,
-               "usage: lion [image.lion | disc.iso] [--frames N] [--dump out.ppm] [--headless]\n"
+               "usage: lion [image.lion | disc.iso] [--frames N] [--dump out.ppm] [--dump-ram file,addr,len] [--headless]\n"
                "            [--verbose] [--trace-tuffy] [--trace-quacker] [--scale N] [--strict-7400]\n"
                "            [--fast-boot]\n"
                "With no image, the console starts its dashboard with an empty CD drive.\n"
@@ -112,6 +113,21 @@ int run_headless(lion::Lion& sys, const Options& opt) {
               (unsigned long long)sys.quacker.instructions, (unsigned long long)sys.qve.vectors_processed());
   std::printf("Spike: %llu triangles, %llu pixels\n", (unsigned long long)sys.spike.triangles(),
               (unsigned long long)sys.spike.pixels());
+  if (!opt.dump_ram.empty()) {  // debugging aid: raw memory after the run
+    char path[512];
+    unsigned addr = 0, len = 0;
+    if (std::sscanf(opt.dump_ram.c_str(), "%511[^,],%x,%x", path, &addr, &len) == 3) {
+      if (const u8* p = sys.bus.host_range(addr, len)) {
+        if (FILE* f = std::fopen(path, "wb")) {
+          std::fwrite(p, 1, len, f);
+          std::fclose(f);
+          std::printf("wrote %s (%u bytes at %08X)\n", path, len, addr);
+        }
+      } else {
+        std::fprintf(stderr, "dump-ram: range not backed by memory\n");
+      }
+    }
+  }
   if (!opt.dump.empty()) {
     std::vector<u32> px;
     if (!sys.vi.scanout(px)) {
@@ -139,6 +155,7 @@ int main(int argc, char** argv) {
     };
     if (a == "--frames") opt.frames = std::atol(next());
     else if (a == "--dump") opt.dump = next(), opt.headless = true;
+    else if (a == "--dump-ram") opt.dump_ram = next(), opt.headless = true;
     else if (a == "--headless") opt.headless = true;
     else if (a == "--verbose") lion::g_verbose = true;
     else if (a == "--scale") opt.scale = std::max(1, std::atoi(next()));

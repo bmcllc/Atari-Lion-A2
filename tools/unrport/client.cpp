@@ -1,8 +1,14 @@
-// Unreal-level viewer for the Atari Lion A2 (Tuffy, freestanding C).
-// Reads the level blob written by unrport (see unrport.cpp) from kLevel, transforms it
-// on the FPU and rasterises it on the Spike (Z-buffered, Gouraud).
+// Unreal-level viewer for the Atari Lion A2 (Tuffy, freestanding C++).
+// Unreal's own Core (compiled for PowerPC, see core/) opens the .unr package from the RAM disc and
+// reads the BSP; this file transforms it on the FPU and rasterises it on the Spike (Z-buffered,
+// Gouraud, textured from the table written by unrport).
+#include "core/level.h"
+
 typedef unsigned int u32;
 typedef int i32;
+
+extern "C" void lion_core_init();
+extern "C" void lion_halt(const char* why);
 
 #define REG(a) (*(volatile u32 *)(a))
 #define SPIKE 0x1F010000u
@@ -14,8 +20,8 @@ typedef int i32;
 #define BUF0 SGRAM
 #define BUF1 (SGRAM + 0x80000u)
 #define ZBUF (SGRAM + 0x200000u)
-#define LEVEL_ADDR 0x00200000u
-#define LEVEL_MAGIC 0x554C564Cu  // "ULVL"
+#define TEXTAB_ADDR 0x00300000u  // texture table from unrport: magic, count, wall/floor/ceiling slots, entries
+#define TEXTAB_MAGIC 0x554C5458u  // "ULTX"
 
 enum { kSetTarget = 1, kClear = 2, kSetMode = 3, kSetTexture = 4, kTri = 5, kSync = 6 };
 enum { kUp = 1, kDown = 2, kLeft = 4, kRight = 8, kA = 16, kB = 32, kL = 1 << 10, kR = 1 << 11 };
@@ -93,29 +99,48 @@ static void draw_poly(const float *v, u32 n, u32 argb) {
   }
 }
 
-int main(void) {
-  const u32 *lv = (const u32 *)LEVEL_ADDR;
-  u32 npoly = lv[0] == LEVEL_MAGIC ? lv[1] : 0;
-  u32 ntex = npoly ? lv[2] : 0;
-  const float *start = (const float *)(lv + 3);  // PlayerStart: x, y, z, yaw, present
-  const u32 *textab = lv + 8, *first = lv + 8 + 4 * ntex;  // per texture: addr, log2 w, log2 h, levels
+static LvLevel g_level;
+static float g_vtx[LV_MAX_POLYS][16 * 5];  // x, y, z, s, t per vertex
+static u32 g_argb[LV_MAX_POLYS], g_tex[LV_MAX_POLYS];
 
-  // Bounds of the level keep the camera inside it.
-  float lo[3] = {-128, -128, -128}, hi[3] = {128, 128, 128};
-  if (npoly) {
-    const u32 *p = first;  // per polygon: nv, colour, texture, normal[3], then nv x (x, y, z, s, t)
-    for (int k = 0; k < 3; ++k) lo[k] = 1e9f, hi[k] = -1e9f;
-    for (u32 i = 0; i < npoly; ++i) {
-      u32 nv = p[0];
-      const float *f = (const float *)(p + 6);
-      for (u32 j = 0; j < nv; ++j)
-        for (int k = 0; k < 3; ++k) {
-          if (f[5 * j + k] < lo[k]) lo[k] = f[5 * j + k];
-          if (f[5 * j + k] > hi[k]) hi[k] = f[5 * j + k];
-        }
-      p += 6 + 5 * nv;
+static u32 color_for(const float *n) {
+  float ax = n[0] < 0 ? -n[0] : n[0], ay = n[1] < 0 ? -n[1] : n[1], az = n[2] < 0 ? -n[2] : n[2];
+  if (az >= ax && az >= ay) return n[2] > 0 ? 0xFF3A4660u : 0xFF6B5A3Cu;  // ceiling slate, floor earth
+  if (ax >= ay) return n[0] > 0 ? 0xFFB05A4Au : 0xFF4F8F6Au;
+  return n[1] > 0 ? 0xFF4A6FB0u : 0xFFB0A04Au;
+}
+
+extern "C" int main(void) {
+  lion_core_init();
+  if (!lion_level_load("level.unr", &g_level)) lion_halt("level load failed");
+  const u32 npoly = g_level.count;
+  const u32 *tt = (const u32 *)TEXTAB_ADDR;
+  const u32 ntex = tt[0] == TEXTAB_MAGIC ? tt[1] : 0;
+  const u32 *slot = tt + 2, *textab = tt + 5;  // per texture: addr, log2 w, log2 h, levels
+  float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+  for (u32 i = 0; i < npoly; ++i) {
+    const LvPoly &p = g_level.polys[i];
+    const float *n = p.normal;
+    float anz = n[2] < 0 ? -n[2] : n[2];
+    u32 s = anz > 0.7f ? (n[2] > 0 ? slot[2] : slot[1]) : slot[0];
+    if (ntex == 0 || s >= ntex) s = 0xFFFFFFFFu;
+    g_tex[i] = s;
+    g_argb[i] = s == 0xFFFFFFFFu ? color_for(n) : 0xFFFFFFFFu;
+    float tw = s == 0xFFFFFFFFu ? 1.0f : (float)(1u << textab[4 * s + 1]);
+    float th = s == 0xFFFFFFFFu ? 1.0f : (float)(1u << textab[4 * s + 2]);
+    for (u32 j = 0; j < p.nv; ++j) {
+      float d[3] = {p.v[3 * j] - p.base[0], p.v[3 * j + 1] - p.base[1], p.v[3 * j + 2] - p.base[2]};
+      float *o = &g_vtx[i][5 * j];
+      for (int k = 0; k < 3; ++k) {
+        o[k] = p.v[3 * j + k];
+        if (o[k] < lo[k]) lo[k] = o[k];
+        if (o[k] > hi[k]) hi[k] = o[k];
+      }
+      o[3] = (d[0] * p.tex_u[0] + d[1] * p.tex_u[1] + d[2] * p.tex_u[2]) / tw;
+      o[4] = (d[0] * p.tex_v[0] + d[1] * p.tex_v[1] + d[2] * p.tex_v[2]) / th;
     }
   }
+  if (!npoly) for (int k = 0; k < 3; ++k) lo[k] = -128, hi[k] = 128;
 
   REG(VI + 0) = 1;  // 240p
   REG(VI + 4) = BUF0;
@@ -123,9 +148,9 @@ int main(void) {
 
   float yaw = 0.6f, pitch = 0.12f;
   for (int k = 0; k < 3; ++k) cam[k] = (lo[k] + hi[k]) * 0.5f;
-  if (npoly && lv[7]) {
-    for (int k = 0; k < 3; ++k) cam[k] = start[k];
-    yaw = start[3];
+  if (g_level.have_start) {
+    for (int k = 0; k < 3; ++k) cam[k] = g_level.start[k];
+    yaw = g_level.yaw;
     pitch = 0;
   }
   u32 token = 0, front = 0;
@@ -166,11 +191,10 @@ int main(void) {
     put(0x2D7F);  // sky blue, RGB565
     put(0xFFFFFF);
 
-    u32 cur = 0xFFFFFFFFu, mode = 0;  // texture currently bound
-    const u32 *p = first;
+    u32 cur = 0xFFFFFFFEu, mode = 0;  // texture currently bound
     for (u32 i = 0; i < npoly; ++i) {
-      u32 nv = p[0], tex = p[2];
-      if (tex != cur || !mode) {
+      u32 tex = g_tex[i];
+      if (tex != cur) {
         cur = tex;
         // Z test | Z write | Gouraud, plus texture, bilinear, perspective, mipmap and trilinear.
         mode = tex < ntex ? 7 | 8 | 16 | 32 | 256 | 512 : 7;
@@ -184,8 +208,7 @@ int main(void) {
           put(textab[4 * tex + 3]);
         }
       }
-      draw_poly((const float *)(p + 6), nv, p[1]);
-      p += 6 + 5 * nv;
+      draw_poly(g_vtx[i], g_level.polys[i].nv, g_argb[i]);
     }
 
     ++token;

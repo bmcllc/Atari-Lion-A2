@@ -146,19 +146,39 @@ docs/           referência de hardware
 - Na disputa pelo barramento, cada mestre usa o próprio relógio; como o escalonador os executa
   em fatias de 1 µs, a ordem entre mestres dentro de uma fatia é aproximada.
 
-## Port parcial do motor Unreal
+## Unreal no Lion
 
-`tools/unrport/` carrega fases do Unreal 1 (`.unr`, pacote v40+) no Lion: `unrport` lê os
-polígonos do BSP compilado (nós, superfícies e vértices do `Model`; sem ele, os brushes) e o `PlayerStart` (posição e direção iniciais), e `client.c` (C freestanding, clang para PowerPC) os transforma na FPU
-do Tuffy e os desenha pela Spike, com Z-buffer e Gouraud. Texturas vêm de `.utx` (paleta de 256 cores e mipmaps, convertidas para RGB565; UVs calculados com
-`TextureU/V` do polígono). Ainda não há outros atores, lightmaps nem UnrealScript; `--gain` compensa a falta de luz.
+O código do **Core do Unreal 1** (o `ULinkerLoad`, `FArchive`, `FName` e o gerenciador de objetos do
+repositório [RedPandaProjects/UnrealEngine](https://github.com/RedPandaProjects/UnrealEngine)) é compilado com
+clang para o Tuffy e roda dentro do emulador. Ele abre o pacote `.unr` a partir de um RAM disc e lê o BSP do
+`Model` e o `PlayerStart`; o visualizador (`tools/unrport/client.cpp`) transforma a geometria na FPU e a
+desenha pela Spike, com Z-buffer, Gouraud e texturas.
+
+Como funciona (`tools/unrport/`):
+- `core/build_core.sh` copia o Core do checkout para uma pasta de trabalho e aplica `core/patch_core.py`
+  (MSVC antigo → clang, big-endian, sem as rotinas x86) e `core/hoist_for.py` (escopo de variável de `for`);
+  o checkout original nunca é modificado e nenhum código da Epic entra neste repositório;
+- `core/lionrt.cpp`: libc mínima, heap, arquivos do RAM disc e stubs da ABI de exceções (um `throw` trava);
+- `core/lionplat.cpp`: substitui o `UnPlat.cpp` do Windows (log, erros, inicialização do Core);
+- `core/level.cpp`: carrega a fase com o Core; `unrport.cpp` (no host) empacota o disco e converte as texturas
+  `.utx` (paleta de 256 cores e mipmaps) para RGB565.
 
 ```bash
 cmake --build build --target unrport
 ```
 
 ```bash
-tools/unrport/build.sh Engine/Maps/Entry.unr build/unreal.iso \
-  --wall Source/Unreal/Textures/MenuGr.utx:smlmet --floor Source/Unreal/Textures/MenuGr.utx:rmetal \
-  --ceiling Source/Unreal/Textures/MenuGr.utx:smlmet --gain 6
+UNREAL_SRC=/caminho/para/UnrealEngine tools/unrport/build.sh $UNREAL_SRC/Engine/Maps/Entry.unr build/unreal.iso \
+  --wall $UNREAL_SRC/Source/Unreal/Textures/MenuGr.utx:smlmet \
+  --floor $UNREAL_SRC/Source/Unreal/Textures/MenuGr.utx:rmetal \
+  --ceiling $UNREAL_SRC/Source/Unreal/Textures/MenuGr.utx:smlmet --gain 6
 ```
+
+```bash
+./build/lion --fast-boot --scale 3 build/unreal.iso
+```
+
+Limites: ainda não há classes do pacote Engine (a validação dos imports é pulada, pois não existem `Engine.u`
+nem `Core.u` no disco), atores além do `PlayerStart`, lightmaps nem UnrealScript. O log do Core fica na RAM em
+`0x00380000` (`./build/lion --headless --frames 60 --dump-ram log.bin,380000,1000 disco.iso`; os 4 primeiros
+bytes são o tamanho). Uma tela vermelha indica erro fatal.
