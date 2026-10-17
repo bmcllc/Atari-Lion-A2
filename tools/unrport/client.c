@@ -97,7 +97,8 @@ int main(void) {
   const u32 *lv = (const u32 *)LEVEL_ADDR;
   u32 npoly = lv[0] == LEVEL_MAGIC ? lv[1] : 0;
   u32 ntex = npoly ? lv[2] : 0;
-  const u32 *textab = lv + 3, *first = lv + 3 + 4 * ntex;  // per texture: addr, log2 w, log2 h, levels
+  const float *start = (const float *)(lv + 3);  // PlayerStart: x, y, z, yaw, present
+  const u32 *textab = lv + 8, *first = lv + 8 + 4 * ntex;  // per texture: addr, log2 w, log2 h, levels
 
   // Bounds of the level keep the camera inside it.
   float lo[3] = {-128, -128, -128}, hi[3] = {128, 128, 128};
@@ -122,6 +123,11 @@ int main(void) {
 
   float yaw = 0.6f, pitch = 0.12f;
   for (int k = 0; k < 3; ++k) cam[k] = (lo[k] + hi[k]) * 0.5f;
+  if (npoly && lv[7]) {
+    for (int k = 0; k < 3; ++k) cam[k] = start[k];
+    yaw = start[3];
+    pitch = 0;
+  }
   u32 token = 0, front = 0;
   for (;;) {
     u32 b = REG(PAD), st = REG(PAD + 4);

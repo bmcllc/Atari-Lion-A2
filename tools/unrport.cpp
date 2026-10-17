@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -50,7 +51,7 @@ struct Reader {
 
 struct Export {
   int cls = 0, name = 0;
-  u32 size = 0, offset = 0;
+  u32 size = 0, offset = 0, flags = 0;
 };
 
 struct Package {
@@ -93,7 +94,7 @@ struct Package {
       r.index();  // super
       r.u32le();  // package
       e.name = r.index();
-      r.u32le();  // object flags
+      e.flags = r.u32le();  // object flags
       e.size = u32(r.index());
       if (e.size > 0) e.offset = u32(r.index());
       exports.push_back(e);
@@ -207,34 +208,156 @@ struct Poly {
   float base[3], normal[3], tex_u[3], tex_v[3];
 };
 
-bool load_level(const std::string& path, std::vector<Poly>* polys, std::string* err) {
+struct Level {
+  std::vector<Poly> polys;
+  float start[3] = {0, 0, 0};
+  float yaw = 0;  // radians
+  bool have_start = false;
+  const char* source = "brush polygons";
+};
+
+// Reads the data of a UDatabase export (vectors, points, nodes...): property list, count, max.
+std::optional<Reader> database(const Package& pkg, int obj, u32* count) {
+  if (obj < 1 || size_t(obj) > pkg.exports.size()) return std::nullopt;
+  const Export& e = pkg.exports[size_t(obj) - 1];
+  std::map<std::string, std::vector<u8>> props;
+  Reader r{pkg.d, pkg.properties(e.offset, &props)};
+  *count = r.u32le();
+  r.u32le();  // DbMax
+  if (!r.ok || *count >= 1000000) return std::nullopt;
+  return r;
+}
+
+// The compiled BSP: node polygons from Nodes/Verts/Points with their surface's texture axes.
+bool load_model(const Package& pkg, const Export& model, Level* level) {
+  std::map<std::string, std::vector<u8>> props;
+  Reader r{pkg.d, pkg.properties(model.offset, &props)};
+  for (int i = 0; i < 25 + 16; ++i) r.byte();  // bounding box, bounding sphere
+  const int vectors = r.index(), points = r.index(), nodes = r.index(), surfs = r.index(), verts = r.index();
+  if (!r.ok) return false;
+  u32 nv = 0, np = 0, nn = 0, ns = 0, nvert = 0;
+  auto ov = database(pkg, vectors, &nv), op = database(pkg, points, &np), on = database(pkg, nodes, &nn),
+       os = database(pkg, surfs, &ns), ot = database(pkg, verts, &nvert);
+  if (!ov || !op || !on || !os || !ot || nn == 0) return false;
+  Reader &rv = *ov, &rp = *op, &rn = *on, &rs = *os, &rt = *ot;
+  auto read_vec = [](Reader& q, u32 n, std::vector<float>* out) {
+    for (u32 i = 0; i < n * 3 && q.ok; ++i) out->push_back(q.f32());
+  };
+  std::vector<float> vec, pts;
+  read_vec(rv, nv, &vec);
+  read_vec(rp, np, &pts);
+  struct Surf { int base, normal, u, v; };
+  std::vector<Surf> surf;
+  for (u32 i = 0; i < ns && rs.ok; ++i) {
+    rs.index();  // texture
+    rs.u32le();  // poly flags
+    const int pb = rs.index(), vn = rs.index(), vu = rs.index(), vv = rs.index();
+    rs.index(), rs.index();  // light map, brush poly
+    rs.u32le();              // pan
+    rs.index();              // actor
+    surf.push_back({pb, vn, vu, vv});
+  }
+  std::vector<int> vert;
+  for (u32 i = 0; i < nvert && rt.ok; ++i) vert.push_back(rt.index()), rt.index();
+  if (!rv.ok || !rp.ok || !rs.ok || !rt.ok) return false;
+  auto vec_at = [&](const std::vector<float>& a, int i, float* o) {
+    if (i < 0 || size_t(i) * 3 + 2 >= a.size()) return false;
+    for (int k = 0; k < 3; ++k) o[k] = a[size_t(i) * 3 + size_t(k)];
+    return true;
+  };
+  for (u32 i = 0; i < nn && rn.ok; ++i) {
+    for (int k = 0; k < 4; ++k) rn.f32();  // plane
+    rn.u32le(), rn.u32le();                // zone mask
+    rn.byte();                             // node flags
+    const int pool = rn.index(), isurf = rn.index();
+    for (int k = 0; k < 5; ++k) rn.index();  // children, bounds
+    rn.byte(), rn.byte();                    // zones
+    const u32 count = rn.byte();
+    rn.u32le(), rn.u32le();  // leaves
+    if (!rn.ok) return false;
+    if (count < 3 || isurf < 0 || size_t(isurf) >= surf.size() || pool < 0 || size_t(pool) + count > vert.size()) continue;
+    const Surf& sf = surf[size_t(isurf)];
+    Poly poly;
+    if (!vec_at(pts, sf.base, poly.base) || !vec_at(vec, sf.normal, poly.normal) || !vec_at(vec, sf.u, poly.tex_u) ||
+        !vec_at(vec, sf.v, poly.tex_v))
+      continue;
+    bool good = true;
+    for (u32 k = 0; k < count && good; ++k) {
+      float p3[3];
+      good = vec_at(pts, vert[size_t(pool) + k], p3);
+      poly.v.insert(poly.v.end(), p3, p3 + 3);
+    }
+    if (good) level->polys.push_back(std::move(poly));
+  }
+  return !level->polys.empty();
+}
+
+// First PlayerStart actor: Location and Rotation.Yaw.
+void find_player_start(const Package& pkg, Level* level) {
+  for (const Export& e : pkg.exports) {
+    if (pkg.class_of(e) != "PlayerStart") continue;
+    std::map<std::string, std::vector<u8>> props;
+    size_t at = e.offset;
+    if (e.flags & 0x02000000) {  // RF_HasStack: node, state node, probe mask, latent action, code offset
+      Reader skip{pkg.d, at};
+      const int node = skip.index();
+      skip.index();
+      for (int i = 0; i < 12; ++i) skip.byte();
+      if (node) skip.index();
+      at = skip.p;
+    }
+    pkg.properties(at, &props);
+    const auto loc = props.find("Location");
+    if (loc != props.end() && loc->second.size() == 12) {
+      Reader r{loc->second, 0};
+      for (float& f : level->start) f = r.f32();
+      level->have_start = true;
+    }
+    const auto rot = props.find("Rotation");
+    if (rot != props.end() && rot->second.size() == 12) {
+      Reader r{rot->second, 4};
+      level->yaw = float(int(r.u32le()) & 0xFFFF) * (6.2831853f / 65536.0f);
+    }
+    return;
+  }
+}
+
+bool load_level(const std::string& path, Level* level, std::string* err) {
   Package pkg;
   if (!pkg.load(path, err)) return false;
-  for (const Export& e : pkg.exports) {
-    if (pkg.class_of(e) != "Polys" || size_t(e.offset) + e.size > pkg.d.size()) continue;
-    Reader p{pkg.d, e.offset + 1};  // skip the property list terminator
-    const u32 count = p.u32le();
-    p.u32le();  // DbMax
-    for (u32 k = 0; k < count && p.ok; ++k) {
-      const int nv = p.index();
-      if (nv < 3 || nv > 16) return *err = "unsupported polygon", false;
-      Poly poly;
-      for (float& f : poly.base) f = p.f32();
-      for (float& f : poly.normal) f = p.f32();
-      for (float& f : poly.tex_u) f = p.f32();
-      for (float& f : poly.tex_v) f = p.f32();
-      for (int i = 0; i < nv * 3; ++i) poly.v.push_back(p.f32());
-      p.u32le();                         // poly flags
-      p.index(), p.index(), p.index();   // actor, texture, item name
-      p.index(), p.index();              // iLink, iBrushPoly
-      p.u32le();                         // pan U, V
-      if (!p.ok) return *err = "truncated polygons", false;
-      bool dup = false;  // the editor stores the same brush more than once
-      for (const Poly& q : *polys) dup |= q.v == poly.v;
-      if (!dup) polys->push_back(std::move(poly));
+  find_player_start(pkg, level);
+  for (const Export& e : pkg.exports)
+    if (pkg.class_of(e) == "Model" && load_model(pkg, e, level)) {
+      level->source = "BSP nodes";
+      break;
+    }
+  if (level->polys.empty()) {
+    for (const Export& e : pkg.exports) {
+      if (pkg.class_of(e) != "Polys" || size_t(e.offset) + e.size > pkg.d.size()) continue;
+      Reader p{pkg.d, e.offset + 1};  // skip the property list terminator
+      const u32 count = p.u32le();
+      p.u32le();  // DbMax
+      for (u32 k = 0; k < count && p.ok; ++k) {
+        const int nv = p.index();
+        if (nv < 3 || nv > 16) return *err = "unsupported polygon", false;
+        Poly poly;
+        for (float& f : poly.base) f = p.f32();
+        for (float& f : poly.normal) f = p.f32();
+        for (float& f : poly.tex_u) f = p.f32();
+        for (float& f : poly.tex_v) f = p.f32();
+        for (int i = 0; i < nv * 3; ++i) poly.v.push_back(p.f32());
+        p.u32le();                        // poly flags
+        p.index(), p.index(), p.index();  // actor, texture, item name
+        p.index(), p.index();             // iLink, iBrushPoly
+        p.u32le();                        // pan U, V
+        if (!p.ok) return *err = "truncated polygons", false;
+        bool dup = false;  // the editor stores the same brush more than once
+        for (const Poly& q : level->polys) dup |= q.v == poly.v;
+        if (!dup) level->polys.push_back(std::move(poly));
+      }
     }
   }
-  return !polys->empty() || (*err = "no polygons found", false);
+  return !level->polys.empty() || (*err = "no polygons found", false);
 }
 
 u32 color_for(const float* n, bool textured) {
@@ -275,9 +398,9 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "unrport: cannot read %s\n", pos[1].c_str());
     return 1;
   }
-  std::vector<Poly> polys;
+  Level world;
   std::string err;
-  if (!load_level(pos[0], &polys, &err)) {
+  if (!load_level(pos[0], &world, &err)) {
     std::fprintf(stderr, "unrport: %s: %s\n", pos[0].c_str(), err.c_str());
     return 1;
   }
@@ -313,8 +436,12 @@ int main(int argc, char** argv) {
   };
   auto putf = [&](float f) { put32(std::bit_cast<u32>(f)); };
   put32(kLevelMagic);
+  const std::vector<Poly>& polys = world.polys;
   put32(u32(polys.size()));
   put32(u32(placed.size()));
+  for (float f : world.start) putf(f);
+  putf(world.yaw);
+  put32(world.have_start);
   for (const Placed& p : placed) put32(p.addr), put32(p.log2w), put32(p.log2h), put32(p.levels);
   for (const Poly& p : polys) {
     const float* n = p.normal;
@@ -347,7 +474,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::fclose(f);
-  std::printf("%zu polygons, %zu textures (%zu bytes) -> %s (%zu bytes of code)\n", polys.size(), textures.size(),
+  std::printf("%zu polygons (%s), %zu textures (%zu bytes) -> %s (%zu bytes of code)\n", polys.size(), world.source, textures.size(),
               texdata.size(), pos[2].c_str(), client.size());
   return 0;
 }

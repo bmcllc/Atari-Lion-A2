@@ -149,9 +149,9 @@ docs/           referência de hardware
 ## Port parcial do motor Unreal
 
 `tools/unrport/` carrega fases do Unreal 1 (`.unr`, pacote v40+) no Lion: `unrport` lê os
-polígonos dos brushes do BSP e `client.c` (C freestanding, clang para PowerPC) os transforma na FPU
+polígonos do BSP compilado (nós, superfícies e vértices do `Model`; sem ele, os brushes) e o `PlayerStart` (posição e direção iniciais), e `client.c` (C freestanding, clang para PowerPC) os transforma na FPU
 do Tuffy e os desenha pela Spike, com Z-buffer e Gouraud. Texturas vêm de `.utx` (paleta de 256 cores e mipmaps, convertidas para RGB565; UVs calculados com
-`TextureU/V` do polígono). Ainda não há atores, lightmaps nem UnrealScript; `--gain` compensa a falta de luz.
+`TextureU/V` do polígono). Ainda não há outros atores, lightmaps nem UnrealScript; `--gain` compensa a falta de luz.
 
 ```bash
 cmake --build build --target unrport
