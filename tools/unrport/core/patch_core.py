@@ -42,6 +42,9 @@ sub("Src/UnObj.cpp", "\t\tif( Obj )\n\t\t\tcheck(Obj->IsValid());", "\t\tif( Obj
 # Debugging aid: report each object created from a package (rate limited).
 sub("Src/UnLinker.h", '\t\t\tdebugfSlow( NAME_DevLoad, "Created %s", Export._Object->GetFullName() );', '\t\t\t{ static INT Created; if( Created++ < 1500 && !Export._Object->IsA(UProperty::StaticClass) ) debugf( "Created %s", Export._Object->GetFullName() ); }')
 
+# Seek becomes part of the archive interface (FArchiveFileLoad::Seek overrides it) so loaders can skip data.
+sub("Inc/UnArc.h", "\tvirtual INT Tell()\t{return -1;}", "\tvirtual INT Tell()\t{return -1;}\n\tvirtual void Seek( INT InPos, INT InReadAhead=0 ) {}")
+
 # Old MSVC leaks the loop variable of the three TMap::Find overloads out of the for statement.
 for old in ("\t\tfor( INT i=0; i<Pairs.Num(); i++ )\n\t\t\tif( Pairs(i).Key==Key )\n\t\t\t\tbreak;\n\t\tif( i<Pairs.Num() )",
             "\t\tfor (INT i = 0; i < Pairs.Num(); i++)\n\t\t\tif (Pairs(i).Key == Key)\n\t\t\t\tbreak;\n\t\tif (i < Pairs.Num())"):

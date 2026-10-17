@@ -30,7 +30,7 @@ fi
 mkdir -p "$lion/Src" "$lion/Inc"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-"$here/core/compile_core.sh" "$cache" "$here/core/lionrt.cpp" "$here/core/lionplat.cpp" "$here/core/level.cpp" "$here/client.cpp"
+"$here/core/compile_core.sh" "$cache" "$here/core/lionrt.cpp" "$here/core/lionplat.cpp" "$here/client.cpp"
 "$here/engine/compile_engine.sh" "$engine" "$cache" "$here/engine/enginetest.cpp" "$here/engine/lionboot.cpp"
 incs="$engine/Inc:$cache/Inc:$cache/Src"
 "$here/engine/compile_pkg.sh" Render "$render" "$incs"

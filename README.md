@@ -157,7 +157,9 @@ entrada pelo controle. O áudio é o `NullAudioSubsystem`.
 
 Estado: o motor sobe, o jogo `UNreal.SinglePlayer` (do pacote `UNreal.u`, lido do CD sob demanda) carrega em cerca de
 90 s de tempo emulado, o jogador `MaleOne` nasce no `Entry.unr` com o HUD e a arma do Unreal, e o jogo roda a 60 Hz
-com colisão e entrada pelo controle. Ainda faltam lightmaps, áudio, e um mapa de verdade (o repositório só traz o
+com colisão e entrada pelo controle. Como o repositório não traz mapas, a sala é povoada por código
+(`engine/lionboot.cpp`: um Krall, um Brute, vida e armas do `UNreal.u`). A tela mostra uma barra de carregamento
+vermelha enquanto o jogo é lido do CD. Ainda faltam lightmaps, áudio, e um mapa de verdade (o repositório só traz o
 `Entry.unr`, uma sala cúbica); sem os mapas originais não há o jogo completo.
 
 Como funciona (`tools/unrport/`):

@@ -21,7 +21,7 @@
 namespace {
 
 constexpr u32 kPackageTag = 0x9E2A83C1;
-constexpr u32 kClientAddr = 0x0001'0000, kTexTableAddr = 0x0030'0000, kRamDiscAddr = 0x0040'0000, kTextureAddr = 0x1040'0000;
+constexpr u32 kClientAddr = 0x0001'0000, kTexTableAddr = 0x0030'0000, kRamDiscAddr = 0x0020'0000, kTextureAddr = 0x1040'0000;
 constexpr u32 kTexTableMagic = 0x554C5458, kRamDiscMagic = 0x4B534452, kNoTexture = 0xFFFFFFFF;
 
 struct Reader {
@@ -400,7 +400,6 @@ int main(int argc, char** argv) {
     img.segments.push_back({0x900, a.finish()});
   }
   img.segments.push_back({kClientAddr, client});
-  img.segments.push_back({kTexTableAddr, table});
   img.segments.push_back({kRamDiscAddr, ramdisc});
   if (!texdata.empty()) img.segments.push_back({kTextureAddr, texdata});
   std::vector<iso9660::File> iso_files = {{"BOOT.LION", img.serialize()}};

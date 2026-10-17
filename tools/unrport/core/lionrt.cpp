@@ -12,12 +12,12 @@ typedef unsigned int u32;
 typedef unsigned char u8;
 
 #define REG(a) (*(volatile u32 *)(a))
-enum : u32 { kHeapStart = 0x00600000, kHeapEnd = 0x01600000, kRamDisc = 0x00400000, kRamDiscMagic = 0x4B534452 };
+enum : u32 { kHeapStart = 0x00400000, kHeapEnd = 0x01600000, kRamDisc = 0x00200000, kRamDiscMagic = 0x4B534452 };
 
 extern "C" {
 
 // ---- debug log ring (read with the emulator's --dump-ram) -------------------------------------
-enum : u32 { kLogAddr = 0x00380000, kLogSize = 0x10000 };
+enum : u32 { kLogAddr = 0x001F0000, kLogSize = 0x10000 };
 void lion_log(const char* text) {
   volatile u32* len = (volatile u32*)kLogAddr;
   volatile char* buf = (volatile char*)(kLogAddr + 4);
