@@ -83,3 +83,7 @@ add_executable(lion_tests
 )
 target_link_libraries(lion_tests PRIVATE lioncore lionasm)
 add_test(NAME lion_tests COMMAND lion_tests)
+
+# Unreal 1 level packager; the PowerPC client is built by tools/unrport/build.sh.
+add_executable(unrport tools/unrport.cpp)
+target_link_libraries(unrport PRIVATE lioncore)

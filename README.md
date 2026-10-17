@@ -145,3 +145,20 @@ docs/           referência de hardware
   fora de ordem nem filas de reserva.
 - Na disputa pelo barramento, cada mestre usa o próprio relógio; como o escalonador os executa
   em fatias de 1 µs, a ordem entre mestres dentro de uma fatia é aproximada.
+
+## Port parcial do motor Unreal
+
+`tools/unrport/` carrega fases do Unreal 1 (`.unr`, pacote v40+) no Lion: `unrport` lê os
+polígonos dos brushes do BSP e `client.c` (C freestanding, clang para PowerPC) os transforma na FPU
+do Tuffy e os desenha pela Spike, com Z-buffer e Gouraud. Texturas vêm de `.utx` (paleta de 256 cores e mipmaps, convertidas para RGB565; UVs calculados com
+`TextureU/V` do polígono). Ainda não há atores, lightmaps nem UnrealScript; `--gain` compensa a falta de luz.
+
+```bash
+cmake --build build --target unrport
+```
+
+```bash
+tools/unrport/build.sh Engine/Maps/Entry.unr build/unreal.iso \
+  --wall Source/Unreal/Textures/MenuGr.utx:smlmet --floor Source/Unreal/Textures/MenuGr.utx:rmetal \
+  --ceiling Source/Unreal/Textures/MenuGr.utx:smlmet --gain 6
+```
