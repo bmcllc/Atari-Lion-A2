@@ -66,7 +66,7 @@ constexpr u32 kMBlend = Spike::kGouraud | Spike::kBlend;
 constexpr u32 kMAdd = Spike::kGouraud | Spike::kBlendAdd;
 constexpr u32 kMText = Spike::kTexture | Spike::kBilinear | Spike::kBlendAdd;
 constexpr u32 kM3D = Spike::kZTest | Spike::kZWrite | Spike::kCullBack;
-constexpr u32 kMGrid = Spike::kBlendAdd;
+constexpr u32 kMGrid = Spike::kBlendAdd | Spike::kGouraud | Spike::kPerspective;
 
 // Constant pool addressed from rPool with 16-bit offsets.
 class Pool {
@@ -475,8 +475,14 @@ void RomBuilder::routines() {
   a_.bne("mesh_qve");
   a_ << slwi(10, 7, 4) << add(5, 5, 10) << mtctr(8);
   lf(25, rom::kAmbient), lf(26, rom::kDiffuse);
+  a_.li32(13, Spike::kTri << 24 | 3 * Spike::kVertexWords);  // triangle header
   a_.label("mesh_tri");
-  a_ << lwz(10, 12, 5) << andi_(0, 9, rom::kMeshUnlit);
+  a_ << lwz(10, 12, 5) << andi_(0, 9, rom::kMeshVertexColors);
+  a_.beq("mesh_face");
+  a_ << mr(11, 10) << lwz(7, 16, 5) << lwz(8, 20, 5);  // colours as given
+  a_.b("mesh_emit");
+  a_.label("mesh_face");
+  a_ << andi_(0, 9, rom::kMeshUnlit);
   a_.bne("mesh_unlit");
   a_ << lfs(2, 16, 5) << lfs(3, 20, 5) << lfs(4, 24, 5);
   a_ << fmuls(27, 2, 7) << fmadds(27, 3, 8, 27) << fmadds(27, 4, 9, 27);
@@ -486,11 +492,13 @@ void RomBuilder::routines() {
   a_ << fmr(27, 1);
   a_.label("mesh_shade");
   shade(10, 27, 11, 12, 7, 8);
-  tri_header();
+  a_ << mr(7, 11) << mr(8, 11);
+  a_.label("mesh_emit");
+  push(13);
   for (int v = 0; v < 3; ++v) {
     a_ << lwz(12, int16_t(4 * v), 5) << add(12, 12, 6);
     for (int w = 0; w < 4; ++w) a_ << lwz(0, int16_t(4 * w), 12) << stw(0, 0, rSpike);
-    push(11), pushf(31), pushf(31);
+    push(v == 0 ? 11 : v == 1 ? 7 : 8), pushf(31), pushf(31);
   }
   a_ << addi(5, 5, 28);
   a_.bdnz("mesh_tri");
@@ -854,7 +862,7 @@ void RomBuilder::dashboard() {
       lf(1, t[i]);
       a_ << stfs(1, int16_t(kXform + 8 + 4 * i), rRam);
     }
-    a_.la(3, "mesh_emblem");
+    a_.la(3, "mesh_emblem_small");
     a_ << addi(4, rRam, kXform) << fmr(1, 30);
     a_.bl("mesh");
   }
@@ -1269,6 +1277,7 @@ void RomBuilder::data() {
     for (u32 x : w) a_.word(x);
   };
   blob("mesh_emblem", rom::mesh_emblem());
+  blob("mesh_emblem_small", rom::mesh_emblem(true));
   blob("mesh_disc", rom::mesh_disc());
   blob("mesh_audio", rom::mesh_audio());
   blob("mesh_chip", rom::mesh_chip());

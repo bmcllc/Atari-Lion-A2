@@ -20,8 +20,11 @@ std::vector<u8> font_texture();
 //   +0 vertex count, +4 triangle count, +8 flags (bit 0: unlit), +12 0
 //   +16 vertices: x, y, z, 1 (floats)
 //   then triangles: three vertex byte offsets (index * 16), ARGB, face normal (3 floats)
+//   (flags bit 0: unlit; bit 1: per-vertex colours, see kMeshVertexColors)
 constexpr u32 kMeshUnlit = 1;
-std::vector<u32> mesh_emblem();  // the Lion mark: three bars inside a mane of rays
+// Bit 1: per-vertex colours (Gouraud, unlit): ARGB is vertex 0, the normal slots hold vertices 1 and 2.
+constexpr u32 kMeshVertexColors = 2;
+std::vector<u32> mesh_emblem(bool small = false);  // the Lion mark: three bars inside a mane of rays
 std::vector<u32> mesh_disc();
 std::vector<u32> mesh_audio();
 std::vector<u32> mesh_chip();

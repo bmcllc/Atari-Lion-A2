@@ -47,10 +47,10 @@ class Tyke : public MmioDevice {
 
  private:
   void step(u32 op);
-  // Bus wait for a single SDRAM beat, converted to Tyke cycles (40 MHz vs 100 MHz bus).
+  // Bus wait for a single SDRAM beat with real-time priority, in Tyke cycles (40 MHz vs 100 MHz bus).
   u32 bus_wait() {
     const u64 t = now_ * kBusHz / kHz;
-    return u32((u64(bus_.acquire(Master::Dma, t, Bus::kSingleCycles)) * kHz + kBusHz - 1) / kBusHz);
+    return u32((u64(bus_.acquire_realtime(Master::Dma, t, Bus::kSingleCycles)) * kHz + kBusHz - 1) / kBusHz);
   }
 
   Bus& bus_;

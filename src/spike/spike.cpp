@@ -123,18 +123,19 @@ bool Spike::execute_next(u64* cost) {
 
 void Spike::clear(u32 flags, u32 color, u32 z) {
   if (!width_ || !height_) return;
+  // One row is built, then copied: the host does this with wide stores.
   if (flags & 1) {
-    for (u32 y = 0; y < height_; ++y) {
-      u8* row = bus_.host_range(color_addr_ + y * stride_, width_ * 2);
-      if (!row) continue;
-      for (u32 x = 0; x < width_; ++x) store_be16(row + x * 2, u16(color));
-    }
+    u8 pattern[2048 * 2];
+    for (u32 x = 0; x < width_; ++x) store_be16(pattern + x * 2, u16(color));
+    for (u32 y = 0; y < height_; ++y)
+      if (u8* row = bus_.host_range(color_addr_ + y * stride_, width_ * 2)) std::memcpy(row, pattern, width_ * 2);
     pixels_ += u64(width_) * height_;
   }
   if (flags & 2) {
-    u8* zb = bus_.host_range(z_addr_, width_ * height_ * 4);
-    if (zb)
-      for (u32 i = 0; i < width_ * height_; ++i) store_be32(zb + i * 4, z & 0xFFFFFF);
+    if (u8* zb = bus_.host_range(z_addr_, width_ * height_ * 4)) {
+      for (u32 x = 0; x < width_; ++x) store_be32(zb + x * 4, z & 0xFFFFFF);
+      for (u32 y = 1; y < height_; ++y) std::memcpy(zb + size_t(y) * width_ * 4, zb, width_ * 4);
+    }
     pixels_ += u64(width_) * height_;
   }
 }
@@ -238,191 +239,182 @@ void Spike::draw_triangle(const Vertex in[3]) {
 
   // Normalised barycentric weight k at (x, y) = E[k] + DX[k] * x + DY[k] * y.
   const float inv_area = 1.0f / area;
-  float E[3], DX[3], DY[3];
+  Setup su;
   for (int k = 0; k < 3; ++k) {
     const int a = (k + 1) % 3, b = (k + 2) % 3;
-    DX[k] = -(Y[b] - Y[a]) * inv_area;
-    DY[k] = (X[b] - X[a]) * inv_area;
-    E[k] = ((X[b] - X[a]) * (-Y[a]) - (Y[b] - Y[a]) * (-X[a])) * inv_area;
+    su.DX[k] = -(Y[b] - Y[a]) * inv_area;
+    su.DY[k] = (X[b] - X[a]) * inv_area;
+    su.E[k] = ((X[b] - X[a]) * (-Y[a]) - (Y[b] - Y[a]) * (-X[a])) * inv_area;
+  }
+  // Attributes as planes A(x, y) = c + dx * x + dy * y (exact for the affine case).
+  auto plane = [&](const float* attr) {
+    Plane pl{0, 0, 0};
+    for (int k = 0; k < 3; ++k) {
+      pl.c += su.E[k] * attr[k];
+      pl.dx += su.DX[k] * attr[k];
+      pl.dy += su.DY[k] * attr[k];
+    }
+    return pl;
+  };
+  const float* const attrs[kAttrs] = {Z, CR, CG, CB, CA, U, V};
+  for (int i = 0; i < kAttrs; ++i) {
+    su.P[i] = plane(attrs[i]);
+    for (int k = 0; k < 3; ++k) su.A[i][k] = attrs[i][k];
+  }
+  for (int k = 0; k < 3; ++k) su.IW[k] = IW[k];
+  su.color = color;
+  su.zbuf = zbuf;
+  su.stride = stride;
+  su.width = width;
+  su.minx = minx;
+  su.maxx = maxx;
+  su.ztest = ztest;
+  su.zwrite = zwrite;
+  su.additive = additive;
+  su.mip = mip;
+  su.tex_w = tex_w;
+  su.tex_h = tex_h;
+  // Without perspective the texel footprint, and so the level of detail, is constant.
+  su.lod = 0.0f;
+  if (mip && !persp) {
+    const float dux = su.P[5].dx * tex_w, dvx = su.P[6].dx * tex_h, duy = su.P[5].dy * tex_w, dvy = su.P[6].dy * tex_h;
+    const float m = std::max(dux * dux + dvx * dvx, duy * duy + dvy * dvy);
+    su.lod = m > 0.0f ? 0.5f * fast_log2(m) : 0.0f;
   }
 
-  // Perspective-correct weights from linear barycentrics (see raster_rows).
+  const int key = (persp ? 16 : 0) | (gouraud ? 8 : 0) | (textured ? 4 : 0) | (blend ? 2 : 0) | (zbuf ? 1 : 0);
+  auto rasterize = [&](int y0, int y1) -> u64 { return kRasterizers[key](*this, su, y0, y1); };
 
   // Rows are independent: large triangles are split into bands across threads.
-  // The pixel loop works on copies: the framebuffer is written through byte
-  // pointers, which would force every captured value to be reloaded per pixel.
-  const auto& o_E = E;
-  const auto& o_DX = DX;
-  const auto& o_DY = DY;
-  const auto& o_Z = Z;
-  const auto& o_IW = IW;
-  const auto& o_U = U;
-  const auto& o_V = V;
-  const auto& o_CR = CR;
-  const auto& o_CG = CG;
-  const auto& o_CB = CB;
-  const auto& o_CA = CA;
-  const auto& o_persp = persp;
-  const auto& o_gouraud = gouraud;
-  const auto& o_additive = additive;
-  const auto& o_ztest = ztest;
-  const auto& o_zwrite = zwrite;
-  const auto& o_mip = mip;
-  const auto& o_tex_w = tex_w;
-  const auto& o_tex_h = tex_h;
-  const auto& o_minx = minx;
-  const auto& o_maxx = maxx;
-  const auto& o_stride = stride;
-  const auto& o_width = width;
-  const auto& o_color = color;
-  const auto& o_zbuf = zbuf;
-  // Specialised on the features that change the per-pixel work the most.
-  auto raster_rows = [&]<bool kTex, bool kBlend, bool kZ>(int y_begin, int y_end) -> u64 {
-  const float E[3] = {o_E[0], o_E[1], o_E[2]};
-  const float DX[3] = {o_DX[0], o_DX[1], o_DX[2]};
-  const float DY[3] = {o_DY[0], o_DY[1], o_DY[2]};
-  const float Z[3] = {o_Z[0], o_Z[1], o_Z[2]};
-  const float IW[3] = {o_IW[0], o_IW[1], o_IW[2]};
-  const float U[3] = {o_U[0], o_U[1], o_U[2]};
-  const float V[3] = {o_V[0], o_V[1], o_V[2]};
-  const float CR[3] = {o_CR[0], o_CR[1], o_CR[2]};
-  const float CG[3] = {o_CG[0], o_CG[1], o_CG[2]};
-  const float CB[3] = {o_CB[0], o_CB[1], o_CB[2]};
-  const float CA[3] = {o_CA[0], o_CA[1], o_CA[2]};
-  const auto persp = o_persp;
-  const auto gouraud = o_gouraud;
-  const auto additive = o_additive;
-  const auto ztest = o_ztest;
-  const auto zwrite = o_zwrite;
-  const auto mip = o_mip;
-  const auto tex_w = o_tex_w;
-  const auto tex_h = o_tex_h;
-  const auto minx = o_minx;
-  const auto maxx = o_maxx;
-  const auto stride = o_stride;
-  const auto width = o_width;
-  const auto color = o_color;
-  const auto zbuf = o_zbuf;
-  auto correct = [&](float b0, float b1, float b2, float* q) {
-    q[0] = b0, q[1] = b1, q[2] = b2;
-    if (persp) {
-      q[0] *= IW[0], q[1] *= IW[1], q[2] *= IW[2];
-      const float s = q[0] + q[1] + q[2];
-      if (s != 0.0f) {
-        const float inv = 1.0f / s;
-        q[0] *= inv, q[1] *= inv, q[2] *= inv;
-      }
-    }
-  };
+  const int rows = maxy - miny + 1;
+  const u64 bbox = u64(rows) * u64(maxx - minx + 1);
+  if (pool_ && bbox >= kParallelArea && rows >= 16) {
+    const unsigned bands = std::min<unsigned>(unsigned(rows) / 8, (pool_->size() + 1) * 2);
+    std::array<u64, 64> counts{};
+    pool_->run(bands, [&](unsigned i) {
+      const int y0 = miny + int(u64(rows) * i / bands), y1 = miny + int(u64(rows) * (i + 1) / bands);
+      counts[i] = rasterize(y0, y1);
+    });
+    for (unsigned i = 0; i < bands; ++i) pixels_ += counts[i];
+  } else {
+    pixels_ += rasterize(miny, maxy + 1);
+  }
+}
+
+// One pixel loop per feature combination. Everything it touches is a local copy:
+// the framebuffer is written through byte pointers, which would otherwise force
+// every value to be reloaded per pixel.
+template <bool kPersp, bool kGouraud, bool kTex, bool kBlend, bool kZ>
+u64 Spike::raster(const Spike& sp, const Setup& in, int y_begin, int y_end) {
+  const Setup su = in;
   u64 drawn = 0;
+  constexpr float k255 = 1.0f / 255.0f;
   for (int y = y_begin; y < y_end; ++y) {
     const float py = float(y) + 0.5f;
-    u8* const crow = color + size_t(y) * stride;
+    u8* const crow = su.color + size_t(y) * su.stride;
     // Span of this row inside all three edges (one pixel of margin; the per-pixel
     // test below stays exact). Thin diagonal triangles have huge bounding boxes.
-    float lo = float(minx), hi = float(maxx);
+    float lo = float(su.minx), hi = float(su.maxx);
     for (int k = 0; k < 3; ++k) {
-      const float at = E[k] + DY[k] * py + DX[k] * 0.5f;  // weight at x = 0
-      if (DX[k] > 0) lo = std::max(lo, -at / DX[k] - 1.0f);
-      else if (DX[k] < 0) hi = std::min(hi, at / -DX[k] + 1.0f);
+      const float at = su.E[k] + su.DY[k] * py + su.DX[k] * 0.5f;  // weight at x = 0
+      if (su.DX[k] > 0) lo = std::max(lo, -at / su.DX[k] - 1.0f);
+      else if (su.DX[k] < 0) hi = std::min(hi, at / -su.DX[k] + 1.0f);
       else if (at < 0) hi = lo - 1.0f;
     }
     if (!(lo <= hi)) continue;
-    const int x0 = std::max(minx, int(lo)), x1 = std::min(maxx, int(hi) + 1);
-    float w0 = E[0] + DY[0] * py + DX[0] * (float(x0) + 0.5f);
-    float w1 = E[1] + DY[1] * py + DX[1] * (float(x0) + 0.5f);
-    float w2 = E[2] + DY[2] * py + DX[2] * (float(x0) + 0.5f);
-    for (int x = x0; x <= x1; ++x, w0 += DX[0], w1 += DX[1], w2 += DX[2]) {
+    const int x0 = std::max(su.minx, int(lo)), x1 = std::min(su.maxx, int(hi) + 1);
+    const float px = float(x0) + 0.5f;
+    float w0 = su.E[0] + su.DY[0] * py + su.DX[0] * px;
+    float w1 = su.E[1] + su.DY[1] * py + su.DX[1] * px;
+    float w2 = su.E[2] + su.DY[2] * py + su.DX[2] * px;
+    // Affine attributes walk their planes; with perspective they come from the weights.
+    float at[kAttrs];
+    for (int i = 0; i < kAttrs; ++i) at[i] = su.P[i].c + su.P[i].dy * py + su.P[i].dx * px;
+    for (int x = x0; x <= x1;
+         ++x, w0 += su.DX[0], w1 += su.DX[1], w2 += su.DX[2], at[0] += su.P[0].dx, at[1] += su.P[1].dx,
+         at[2] += su.P[2].dx, at[3] += su.P[3].dx, at[4] += su.P[4].dx, at[5] += su.P[5].dx, at[6] += su.P[6].dx) {
       if (w0 < 0 || w1 < 0 || w2 < 0) continue;
 
       u32 z24 = 0;
       u8* zp = nullptr;
       if constexpr (kZ) {
-        const float z = w0 * Z[0] + w1 * Z[1] + w2 * Z[2];
-        z24 = u32(int(std::clamp(z, 0.0f, 1.0f) * float(0xFFFFFF)));
-        zp = zbuf + (size_t(y) * width + size_t(x)) * 4;
-        if (ztest && z24 >= (load_be32(zp) & 0xFFFFFF)) continue;
+        z24 = u32(int(std::clamp(at[0], 0.0f, 1.0f) * float(0xFFFFFF)));
+        zp = su.zbuf + (size_t(y) * su.width + size_t(x)) * 4;
+        if (su.ztest && z24 >= (load_be32(zp) & 0xFFFFFF)) continue;
       }
 
-      float q[3];
-      correct(w0, w1, w2, q);
+      float q[3] = {w0, w1, w2};
+      if constexpr (kPersp) {
+        q[0] *= su.IW[0], q[1] *= su.IW[1], q[2] *= su.IW[2];
+        const float s = q[0] + q[1] + q[2];
+        if (s != 0.0f) {
+          const float inv = 1.0f / s;
+          q[0] *= inv, q[1] *= inv, q[2] *= inv;
+        }
+      }
+      auto attr = [&](int i) {
+        if constexpr (kPersp) return q[0] * su.A[i][0] + q[1] * su.A[i][1] + q[2] * su.A[i][2];
+        else return at[i];
+      };
 
       float r, g, b, a;
-      if (gouraud) {
-        r = q[0] * CR[0] + q[1] * CR[1] + q[2] * CR[2];
-        g = q[0] * CG[0] + q[1] * CG[1] + q[2] * CG[2];
-        b = q[0] * CB[0] + q[1] * CB[1] + q[2] * CB[2];
-        a = q[0] * CA[0] + q[1] * CA[1] + q[2] * CA[2];
+      if constexpr (kGouraud) {
+        r = attr(1), g = attr(2), b = attr(3), a = attr(4);
       } else {
-        r = CR[0], g = CG[0], b = CB[0], a = CA[0];
+        r = su.A[1][0], g = su.A[2][0], b = su.A[3][0], a = su.A[4][0];
       }
       if constexpr (kTex) {
-        const float u = q[0] * U[0] + q[1] * U[1] + q[2] * U[2];
-        const float tv = q[0] * V[0] + q[1] * V[1] + q[2] * V[2];
-        float lod = 0.0f;
-        if (mip) {
+        const float u = attr(5), tv = attr(6);
+        float lod = su.lod;
+        if (kPersp && su.mip) {
           // Level of detail from the texel footprint of one pixel step in x and y.
+          auto weights = [&](float b0, float b1, float b2, float* o) {
+            o[0] = b0 * su.IW[0], o[1] = b1 * su.IW[1], o[2] = b2 * su.IW[2];
+            const float s = o[0] + o[1] + o[2];
+            if (s != 0.0f) {
+              const float inv = 1.0f / s;
+              o[0] *= inv, o[1] *= inv, o[2] *= inv;
+            }
+          };
           float qx[3], qy[3];
-          correct(w0 + DX[0], w1 + DX[1], w2 + DX[2], qx);
-          correct(w0 + DY[0], w1 + DY[1], w2 + DY[2], qy);
-          const float dux = (qx[0] * U[0] + qx[1] * U[1] + qx[2] * U[2] - u) * tex_w;
-          const float dvx = (qx[0] * V[0] + qx[1] * V[1] + qx[2] * V[2] - tv) * tex_h;
-          const float duy = (qy[0] * U[0] + qy[1] * U[1] + qy[2] * U[2] - u) * tex_w;
-          const float dvy = (qy[0] * V[0] + qy[1] * V[1] + qy[2] * V[2] - tv) * tex_h;
+          weights(w0 + su.DX[0], w1 + su.DX[1], w2 + su.DX[2], qx);
+          weights(w0 + su.DY[0], w1 + su.DY[1], w2 + su.DY[2], qy);
+          auto dot = [&](const float* w, int i) { return w[0] * su.A[i][0] + w[1] * su.A[i][1] + w[2] * su.A[i][2]; };
+          const float dux = (dot(qx, 5) - u) * su.tex_w, dvx = (dot(qx, 6) - tv) * su.tex_h;
+          const float duy = (dot(qy, 5) - u) * su.tex_w, dvy = (dot(qy, 6) - tv) * su.tex_h;
           const float m = std::max(dux * dux + dvx * dvx, duy * duy + dvy * dvy);
           lod = m > 0.0f ? 0.5f * fast_log2(m) : 0.0f;  // log2 of the larger footprint length
         }
-        const u32 t = sample_lod(u, tv, lod);
-        constexpr float k = 1.0f / 255.0f;
-        r *= float((t >> 16) & 0xFF) * k;
-        g *= float((t >> 8) & 0xFF) * k;
-        b *= float(t & 0xFF) * k;
+        const u32 t = sp.sample_lod(u, tv, lod);
+        r *= float((t >> 16) & 0xFF) * k255;
+        g *= float((t >> 8) & 0xFF) * k255;
+        b *= float(t & 0xFF) * k255;
       }
       u8* const cp = crow + size_t(x) * 2;
       if constexpr (kBlend) {
-        const float al = a / 255.0f;
+        const float al = a * k255;
         const u32 dst = rgb565_to_xrgb(load_be16(cp));
-        const float keep = additive ? 1.0f : 1.0f - al;
+        const float keep = su.additive ? 1.0f : 1.0f - al;
         r = r * al + float((dst >> 16) & 0xFF) * keep;
         g = g * al + float((dst >> 8) & 0xFF) * keep;
         b = b * al + float(dst & 0xFF) * keep;
       }
       store_be16(cp, xrgb_to_rgb565(u32(int(std::clamp(r, 0.0f, 255.0f))), u32(int(std::clamp(g, 0.0f, 255.0f))),
                                     u32(int(std::clamp(b, 0.0f, 255.0f)))));
-      if (kZ && zwrite) store_be32(zp, (load_be32(zp) & 0xFF00'0000u) | z24);
+      if (kZ && su.zwrite) store_be32(zp, (load_be32(zp) & 0xFF00'0000u) | z24);
       ++drawn;
     }
   }
   return drawn;
-  };
-
-  auto rasterize = [&](int y0, int y1) -> u64 {
-    const int key = (textured ? 4 : 0) | (blend ? 2 : 0) | (zbuf ? 1 : 0);
-    switch (key) {
-      case 0: return raster_rows.template operator()<false, false, false>(y0, y1);
-      case 1: return raster_rows.template operator()<false, false, true>(y0, y1);
-      case 2: return raster_rows.template operator()<false, true, false>(y0, y1);
-      case 3: return raster_rows.template operator()<false, true, true>(y0, y1);
-      case 4: return raster_rows.template operator()<true, false, false>(y0, y1);
-      case 5: return raster_rows.template operator()<true, false, true>(y0, y1);
-      case 6: return raster_rows.template operator()<true, true, false>(y0, y1);
-      default: return raster_rows.template operator()<true, true, true>(y0, y1);
-    }
-  };
-
-  const int rows = maxy - miny + 1;
-  const u64 bbox = u64(rows) * u64(maxx - minx + 1);
-  if (pool_ && bbox >= kParallelArea && rows >= 16) {
-    const unsigned bands = std::min<unsigned>(unsigned(rows) / 8, (pool_->size() + 1) * 2);
-    std::vector<u64> counts(bands, 0);
-    pool_->run(bands, [&](unsigned i) {
-      const int y0 = miny + int(u64(rows) * i / bands), y1 = miny + int(u64(rows) * (i + 1) / bands);
-      counts[i] = rasterize(y0, y1);
-    });
-    for (u64 c : counts) pixels_ += c;
-  } else {
-    pixels_ += rasterize(miny, maxy + 1);
-  }
 }
+
+#define LION_RASTER(n) &Spike::raster<bool((n) & 16), bool((n) & 8), bool((n) & 4), bool((n) & 2), bool((n) & 1)>
+const Spike::RasterFn Spike::kRasterizers[32] = {
+    LION_RASTER(0),  LION_RASTER(1),  LION_RASTER(2),  LION_RASTER(3),  LION_RASTER(4),  LION_RASTER(5),  LION_RASTER(6),
+    LION_RASTER(7),  LION_RASTER(8),  LION_RASTER(9),  LION_RASTER(10), LION_RASTER(11), LION_RASTER(12), LION_RASTER(13),
+    LION_RASTER(14), LION_RASTER(15), LION_RASTER(16), LION_RASTER(17), LION_RASTER(18), LION_RASTER(19), LION_RASTER(20),
+    LION_RASTER(21), LION_RASTER(22), LION_RASTER(23), LION_RASTER(24), LION_RASTER(25), LION_RASTER(26), LION_RASTER(27),
+    LION_RASTER(28), LION_RASTER(29), LION_RASTER(30), LION_RASTER(31)};
+#undef LION_RASTER
 
 }  // namespace lion

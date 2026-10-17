@@ -87,10 +87,10 @@ class MeshBuilder {
     tri(a, b, c, argb, inside);
     tri(a, c, d, argb, inside);
   }
-  // Unlit, unculled geometry (the grid): no orientation needed.
-  void flat_quad(V3 a, V3 b, V3 c, V3 d, u32 argb) {
-    tris_.push_back({{vertex(a), vertex(b), vertex(c)}, argb, {0, 0, 1}});
-    tris_.push_back({{vertex(a), vertex(c), vertex(d)}, argb, {0, 0, 1}});
+  // Unlit, unculled geometry (the grid) with a colour per corner: no orientation needed.
+  void gouraud_quad(V3 a, V3 b, V3 c, V3 d, u32 ca, u32 cb, u32 cc, u32 cd) {
+    tris_.push_back({{vertex(a), vertex(b), vertex(c)}, ca, {bits_to_f32(cb), bits_to_f32(cc), 0}});
+    tris_.push_back({{vertex(a), vertex(c), vertex(d)}, ca, {bits_to_f32(cc), bits_to_f32(cd), 0}});
   }
   void box(V3 c, V3 h, u32 argb) {
     V3 p[8];
@@ -287,7 +287,9 @@ std::vector<u8> font_texture() {
   return out;
 }
 
-std::vector<u32> mesh_emblem() {
+std::vector<u32> mesh_emblem(bool small) {
+  // The small version (dashboard header) has a coarser ring and bars.
+  const int bar_segments = small ? 3 : 5, ring_segments = small ? 12 : 24;
   MeshBuilder m;
   const u32 red = argb(0.92, 0.10, 0.10), gold = argb(0.96, 0.66, 0.18), amber = argb(0.80, 0.48, 0.12);
   // Centre bar.
@@ -295,8 +297,8 @@ std::vector<u32> mesh_emblem() {
   // Side bars: they leave the apex and flare out towards the base.
   for (float side : {-1.0f, 1.0f}) {
     std::vector<V3> path;
-    for (int k = 0; k <= 5; ++k) {
-      const float y = 1.0f - 2.0f * float(k) / 5.0f, u = (1 - y) / 2;
+    for (int k = 0; k <= bar_segments; ++k) {
+      const float y = 1.0f - 2.0f * float(k) / float(bar_segments), u = (1 - y) / 2;
       path.push_back({side * (0.36f + 0.58f * u * u), y, 0});
     }
     const float w = 0.14f, d = 0.14f;
@@ -307,7 +309,7 @@ std::vector<u32> mesh_emblem() {
   }
   // Ring.
   {
-    constexpr int kSeg = 24;
+    const int kSeg = ring_segments;
     const float r = 1.22f, t = 0.05f;
     std::vector<V3> path;
     for (int k = 0; k <= kSeg; ++k) {
@@ -337,7 +339,7 @@ std::vector<u32> mesh_emblem() {
 
 std::vector<u32> mesh_disc() {
   MeshBuilder m;
-  constexpr int kSeg = 32;
+  constexpr int kSeg = 24;
   const float ri = 0.20f, ro = 0.92f, t = 0.05f;
   for (int k = 0; k < kSeg; ++k) {
     const float a0 = float(2 * kPi * k / kSeg), a1 = float(2 * kPi * (k + 1) / kSeg), am = (a0 + a1) / 2;
@@ -382,7 +384,7 @@ std::vector<u32> mesh_chip() {
 }
 
 std::vector<u32> mesh_grid() {
-  MeshBuilder m(kMeshUnlit);
+  MeshBuilder m(kMeshUnlit | kMeshVertexColors);
   constexpr float kNear = 3.0f, kFar = 36.0f, kHalf = 14.0f;
   auto color = [&](float dist) {
     const double f = std::pow(std::clamp(1.0 - (dist - kNear) / (kFar - kNear), 0.0, 1.0), 1.4);
@@ -391,14 +393,17 @@ std::vector<u32> mesh_grid() {
   // Lines across the view, thicker with distance so they stay about a pixel high.
   for (float z = kNear; z <= kFar; z += kGridStep) {
     const float dz = std::max(0.04f, z * z / 420.0f);
-    m.flat_quad({-kHalf, 0, -z - dz / 2}, {kHalf, 0, -z - dz / 2}, {kHalf, 0, -z + dz / 2}, {-kHalf, 0, -z + dz / 2}, color(z));
+    const u32 c = color(z);
+    m.gouraud_quad({-kHalf, 0, -z - dz / 2}, {kHalf, 0, -z - dz / 2}, {kHalf, 0, -z + dz / 2}, {-kHalf, 0, -z + dz / 2},
+                   c, c, c, c);
   }
-  // Lines towards the horizon, in segments that widen and fade with distance.
-  for (float x = -kHalf; x <= kHalf + 0.01f; x += 1.4f)
-    for (float z = kNear; z < kFar; z += 3.0f) {
-      const float z1 = std::min(kFar, z + 3.0f), w0 = 0.0026f * z, w1 = 0.0026f * z1;  // about 2 px wide
-      m.flat_quad({x - w0, 0, -z}, {x + w0, 0, -z}, {x + w1, 0, -z1}, {x - w1, 0, -z1}, color((z + z1) / 2));
-    }
+  // Lines towards the horizon: one trapezoid each, about 2 px wide all along,
+  // fading with distance (Spike interpolates the colours with perspective).
+  for (float x = -kHalf; x <= kHalf + 0.01f; x += 1.4f) {
+    const float w0 = 0.0026f * kNear, w1 = 0.0026f * kFar;
+    const u32 cn = color(kNear), cf = color(kFar);
+    m.gouraud_quad({x - w0, 0, -kNear}, {x + w0, 0, -kNear}, {x + w1, 0, -kFar}, {x - w1, 0, -kFar}, cn, cn, cf, cf);
+  }
   return m.words();
 }
 

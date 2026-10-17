@@ -233,10 +233,11 @@ endereços da interface anterior:
 | `+0x108 + 0x20 × ch`   | LOOP_START | Amostra de retorno do loop                       |
 | `+0x10C + 0x20 × ch`   | PITCH      | Passo 16.16 por amostra de saída (0x10000 = 44,1 kHz) |
 | `+0x110 + 0x20 × ch`   | VOLUME     | `L << 16 \| R`, 0–0x100 cada                      |
-| `+0x114 + 0x20 × ch`   | CTRL       | bit 0 KEY_ON (subida reinicia a amostra), bit 1 LOOP |
+| `+0x114 + 0x20 × ch`   | CTRL       | bit 0 KEY_ON, bit 1 LOOP, bit 8 confirmação do firmware (toda escrita do host a limpa, então escrever KEY_ON sempre reinicia a amostra) |
 | `+0x118 + 0x20 × ch`   | POSITION   | Amostra atual (escrita pelo firmware)            |
 
-Com os 24 canais ativos, o firmware ocupa cerca de 95% do DSP e ainda fecha cada amostra a tempo.
+Com os 24 canais ativos, o firmware ocupa cerca de 82% do DSP; a folga cobre as esperas pelo
+barramento quando o Tuffy disputa a SDRAM.
 
 
 ## CD-ROM (`0x1F06_0000`)
@@ -369,7 +370,8 @@ As codificações seguem a tabela de opcodes do GNU binutils (`m88k-opcode.h`, e
   filtragem trilinear, blend e culling. No emulador, triângulos grandes são divididos em faixas
   de linhas entre várias threads, com o mesmo resultado de uma thread só.
 - **Tyke:** DSP programável com firmware de mixagem de 24 canais. O relógio do DSP é absoluto:
-  esperas pelo barramento são compensadas nas fatias seguintes.
+  esperas pelo barramento são compensadas nas fatias seguintes. No árbitro da SDRAM o Tyke tem
+  prioridade de tempo real: espera no máximo a transferência em andamento e passa à frente da fila.
 - **CD-ROM:** drive 12× com busca, DMA e interrupção.
 - **Boot ROM:** intro, dashboard e loader em código PowerPC.
-- **Barramento:** disputa pela SDRAM entre os mestres.
+- **Barramento:** disputa pela SDRAM entre os mestres, com prioridade de tempo real para o Tyke.

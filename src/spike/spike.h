@@ -64,6 +64,27 @@ class Spike : public MmioDevice {
   void write32(u32 offset, u32 value, Master who, bool* stall) override;
 
  private:
+  // Per-triangle state handed to the pixel loops.
+  static constexpr int kAttrs = 7;  // z, r, g, b, a, u, v
+  struct Plane {
+    float c, dx, dy;
+  };
+  struct Setup {
+    float E[3], DX[3], DY[3], IW[3];
+    float A[kAttrs][3];  // per-vertex values
+    Plane P[kAttrs];     // affine planes
+    u8* color;
+    u8* zbuf;
+    u32 stride, width;
+    int minx, maxx;
+    bool ztest, zwrite, additive, mip;
+    float tex_w, tex_h, lod;
+  };
+  template <bool kPersp, bool kGouraud, bool kTex, bool kBlend, bool kZ>
+  static u64 raster(const Spike& sp, const Setup& su, int y_begin, int y_end);
+  using RasterFn = u64 (*)(const Spike&, const Setup&, int, int);
+  static const RasterFn kRasterizers[32];
+
   bool execute_next(u64* cost);
   void clear(u32 flags, u32 color, u32 z);
   u32 sample(u32 level, float u, float v) const;  // returns XRGB8888

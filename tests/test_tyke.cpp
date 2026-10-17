@@ -94,7 +94,35 @@ TEST(tyke_24_channels_fit_in_real_time) {
   sys.tyke.run(Tyke::kHz / 10);  // 100 ms
   std::vector<s16> out;
   sys.tyke.drain(out);
-  // 4410 frames expected; the firmware must not fall behind the 44.1 kHz clock.
+  // 4410 frames expected; the firmware must not fall behind the 44.1 kHz clock,
+  // and must leave headroom for bus waits.
   CHECK(out.size() / 2 >= 4405);
-  CHECK(sys.tyke.idle_cycles > 0);
+  CHECK(sys.tyke.idle_cycles > sys.tyke.total_cycles / 6);
+}
+
+TEST(tyke_clock_absorbs_bus_stalls) {
+  // Tuffy streams through memory (every access misses) while all 24 voices fetch
+  // samples over the bus. Waits must not push the DSP's clock, and with it its
+  // bus reservations, ahead of the rest of the system.
+  Lion sys;
+  for (int i = 0; i < 1024; ++i) store_be16(sys.bus.host_ptr(0x9000 + u32(i) * 2), u16(i));
+  ppcasm::Asm t(0x2000);
+  t.li32(3, 0x0040'0000);
+  t.label("loop");
+  t << ppcasm::lwz(5, 0, 3) << ppcasm::addi(3, 3, 32);
+  t.b("loop");
+  auto code = t.finish();
+  std::copy(code.begin(), code.end(), sys.bus.host_ptr(0x2000));
+  sys.tuffy.reset(0x2000, Lion::kBootMsr);
+  sys.tyke.load_program(lion::tyke_mixer_firmware());
+  for (int ch = 0; ch < 24; ++ch) channel(sys, ch, 0x9000, 1024, 0, 0x10000, 0x0008'0008, 3);
+  for (int f = 1; f <= 30; ++f) {
+    sys.run_frame();
+    if (f > 1) CHECK_EQ(sys.audio.size(), 2u * 735);  // exactly one frame of 44.1 kHz stereo
+    sys.audio.clear();
+    const u64 now = u64(f) * lion::kBusHz / lion::kFrameRate;
+    const u64 busy_until = now + sys.bus.acquire(lion::Master::Dma, now, 0);
+    CHECK(busy_until <= now + 1000);  // within a few µs of real time
+  }
+  CHECK(sys.bus.contention[size_t(lion::Master::Dma)] > 0);  // the voices did wait for the bus
 }

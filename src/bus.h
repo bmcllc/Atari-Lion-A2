@@ -76,6 +76,16 @@ class Bus {
     busy_cycles += duration;
     return wait;
   }
+  // Real-time masters (Tyke) jump the queue: they wait at most for the transfer
+  // in progress, and everyone queued behind is pushed back instead.
+  u32 acquire_realtime(Master who, u64 t, u32 duration) {
+    const u64 start = busy_until_ > t ? t + std::min<u64>(busy_until_ - t, kLineFillCycles) : t;
+    busy_until_ = std::max(busy_until_, start) + duration;
+    const u32 wait = u32(start - t);
+    contention[size_t(who)] += wait;
+    busy_cycles += duration;
+    return wait;
+  }
   u64 contention[3] = {};  // bus cycles each master spent waiting (Tuffy, Quacker, DMA)
   u64 busy_cycles = 0;
 
