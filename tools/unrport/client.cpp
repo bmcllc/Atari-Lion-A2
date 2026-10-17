@@ -9,6 +9,9 @@ typedef int i32;
 
 extern "C" void lion_core_init();
 extern "C" void lion_halt(const char* why);
+extern "C" void lion_engine_test();
+extern "C" void lion_engine_boot();
+extern "C" void lion_engine_tick();
 
 #define REG(a) (*(volatile u32 *)(a))
 #define SPIKE 0x1F010000u
@@ -112,6 +115,9 @@ static u32 color_for(const float *n) {
 
 extern "C" int main(void) {
   lion_core_init();
+  lion_engine_test();
+  lion_engine_boot();
+  for (;;) lion_engine_tick();
   if (!lion_level_load("level.unr", &g_level)) lion_halt("level load failed");
   const u32 npoly = g_level.count;
   const u32 *tt = (const u32 *)TEXTAB_ADDR;

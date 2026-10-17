@@ -215,11 +215,13 @@ int main(int argc, char** argv) {
   std::vector<std::string> pos;
   std::string specs[3];  // wall, floor, ceiling
   float gain = 1.0f;
+  std::vector<std::string> extra_files;  // --file: more files for the RAM disc
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const int slot = a == "--wall" ? 0 : a == "--floor" ? 1 : a == "--ceiling" ? 2 : -1;
     if (slot >= 0 && i + 1 < argc) specs[slot] = argv[++i];
     else if (a == "--gain" && i + 1 < argc) gain = std::strtof(argv[++i], nullptr);
+    else if (a == "--file" && i + 1 < argc) extra_files.push_back(argv[++i]);
     else pos.push_back(a);
   }
   if (pos.size() != 3) {
@@ -279,13 +281,35 @@ int main(int argc, char** argv) {
   for (u32 t : slot_tex) be32(table, t);  // wall, floor, ceiling
   for (const Placed& p : placed) be32(table, p.addr), be32(table, p.log2w), be32(table, p.log2h), be32(table, p.levels);
   // RAM disc: magic, count, then {48-byte name, offset, size} and the files.
+  struct DiscFile { std::string name; std::vector<u8> data; };
+  std::vector<DiscFile> files;
+  files.push_back({pos[0].substr(pos[0].find_last_of('/') + 1), unr});  // the engine finds maps by name
+  for (const std::string& path : extra_files) {
+    DiscFile f;
+    f.name = path.substr(path.find_last_of('/') + 1);
+    if (f.name.size() >= 48 || !lion::read_file(path, &f.data)) {
+      std::fprintf(stderr, "unrport: cannot add %s\n", path.c_str());
+      return 1;
+    }
+    files.push_back(std::move(f));
+  }
   be32(ramdisc, kRamDiscMagic);
-  be32(ramdisc, 1);
-  const std::string name = "level.unr";
-  for (size_t i = 0; i < 48; ++i) ramdisc.push_back(i < name.size() ? u8(name[i]) : u8(0));
-  be32(ramdisc, u32(ramdisc.size() + 8));
-  be32(ramdisc, u32(unr.size()));
-  ramdisc.insert(ramdisc.end(), unr.begin(), unr.end());
+  be32(ramdisc, u32(files.size()));
+  size_t dir_end = ramdisc.size() + files.size() * 56, offset = dir_end;
+  for (const DiscFile& f : files) {
+    for (size_t i = 0; i < 48; ++i) ramdisc.push_back(i < f.name.size() ? u8(f.name[i]) : u8(0));
+    be32(ramdisc, u32(offset));
+    be32(ramdisc, u32(f.data.size()));
+    offset += (f.data.size() + 3) & ~size_t(3);
+  }
+  for (const DiscFile& f : files) {
+    ramdisc.insert(ramdisc.end(), f.data.begin(), f.data.end());
+    while (ramdisc.size() % 4) ramdisc.push_back(0);
+  }
+  if (ramdisc.size() > 0x600000) {
+    std::fprintf(stderr, "unrport: RAM disc is %zu bytes; the limit is 6 MB\n", ramdisc.size());
+    return 1;
+  }
 
   lion::LionImage img;
   img.entry = kClientAddr;

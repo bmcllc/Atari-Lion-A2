@@ -111,6 +111,7 @@ int run_headless(lion::Lion& sys, const Options& opt) {
   std::printf("Tuffy: %llu instr / %llu cycles   Quacker: %llu instr   QVE: %llu vectors\n",
               (unsigned long long)sys.tuffy.instructions, (unsigned long long)sys.tuffy.total_cycles,
               (unsigned long long)sys.quacker.instructions, (unsigned long long)sys.qve.vectors_processed());
+  std::printf("Tuffy state: PC=%08X LR=%08X SP=%08X CTR=%08X\n", sys.tuffy.pc, sys.tuffy.lr, sys.tuffy.gpr[1], sys.tuffy.ctr);
   std::printf("Spike: %llu triangles, %llu pixels\n", (unsigned long long)sys.spike.triangles(),
               (unsigned long long)sys.spike.pixels());
   if (!opt.dump_ram.empty()) {  // debugging aid: raw memory after the run

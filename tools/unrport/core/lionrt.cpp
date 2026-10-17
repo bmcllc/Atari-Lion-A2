@@ -16,10 +16,22 @@ enum : u32 { kHeapStart = 0x00A00000, kHeapEnd = 0x01600000, kRamDisc = 0x004000
 
 extern "C" {
 
+// ---- debug log ring (read with the emulator's --dump-ram) -------------------------------------
+enum : u32 { kLogAddr = 0x00380000, kLogSize = 0x10000 };
+void lion_log(const char* text) {
+  volatile u32* len = (volatile u32*)kLogAddr;
+  volatile char* buf = (volatile char*)(kLogAddr + 4);
+  for (; *text; ++text)
+    if (*len < kLogSize - 8) buf[(*len)++] = *text;
+  if (*len < kLogSize - 8) buf[(*len)++] = '\n';
+}
+
 // ---- halt / panic ---------------------------------------------------------------------------
 const char* g_panic = 0;
 void lion_halt(const char* why) {
   g_panic = why;
+  lion_log("HALT:");
+  lion_log(why);
   // Panic screen: red 320x240 frame on the SGRAM so a stuck boot is visible.
   volatile unsigned short* fb = (volatile unsigned short*)0x10000000;
   for (int i = 0; i < 320 * 240; ++i) fb[i] = 0xF800;
@@ -32,17 +44,30 @@ void exit(int) { lion_halt("exit"); }
 // ---- memory ---------------------------------------------------------------------------------
 void* memcpy(void* d, const void* s, size_t n) {
   u8* a = (u8*)d; const u8* b = (const u8*)s;
+  if ((((u32)a | (u32)b) & 3) == 0) {  // word copies when both sides are aligned
+    u32* wa = (u32*)a; const u32* wb = (const u32*)b;
+    for (; n >= 16; n -= 16) { wa[0] = wb[0]; wa[1] = wb[1]; wa[2] = wb[2]; wa[3] = wb[3]; wa += 4; wb += 4; }
+    for (; n >= 4; n -= 4) *wa++ = *wb++;
+    a = (u8*)wa; b = (const u8*)wb;
+  }
   while (n--) *a++ = *b++;
   return d;
 }
 void* memmove(void* d, const void* s, size_t n) {
   u8* a = (u8*)d; const u8* b = (const u8*)s;
-  if (a < b) { while (n--) *a++ = *b++; }
-  else { a += n; b += n; while (n--) *--a = *--b; }
+  if (a < b || a >= b + n) return memcpy(d, s, n);
+  a += n; b += n;
+  while (n--) *--a = *--b;
   return d;
 }
 void* memset(void* d, int c, size_t n) {
   u8* a = (u8*)d;
+  while (n && ((u32)a & 3)) { *a++ = (u8)c; --n; }
+  const u32 w = (u8)c * 0x01010101u;
+  u32* wa = (u32*)a;
+  for (; n >= 16; n -= 16) { wa[0] = w; wa[1] = w; wa[2] = w; wa[3] = w; wa += 4; }
+  for (; n >= 4; n -= 4) *wa++ = w;
+  a = (u8*)wa;
   while (n--) *a++ = (u8)c;
   return d;
 }
@@ -235,6 +260,9 @@ double atan2(double y, double x) {
   return y > 0 ? pi / 2 : y < 0 ? -pi / 2 : 0;
 }
 double exp(double x) {
+  if (x != x) return x;
+  if (x > 700) return 1e300;
+  if (x < -700) return 0;
   int k = (int)floor(x / 0.693147180559945);
   double r = x - k * 0.693147180559945, term = 1, s = 1;
   for (int i = 1; i < 20; ++i) { term *= r / i; s += term; }
@@ -243,7 +271,9 @@ double exp(double x) {
   return s;
 }
 double log(double x) {
+  if (x != x) return x;
   if (x <= 0) return -1e300;
+  if (x > 1e300) return 690.0;
   int k = 0;
   while (x > 1.5) { x *= 0.5; ++k; }
   while (x < 0.75) { x *= 2; --k; }
@@ -389,7 +419,11 @@ int sprintf(char* out, const char* fmt, ...) {
 int __cxa_atexit(void (*)(void*), void*, void*) { return 0; }
 void* __dso_handle = 0;
 void* __cxa_allocate_exception(size_t n) { return malloc(n); }
-void __cxa_throw(void*, void*, void (*)(void*)) { lion_halt("uncaught exception"); }
+void __cxa_throw(void* obj, void*, void (*)(void*)) {
+  lion_log("THROW:");
+  lion_log(*(const char**)obj);  // appThrowf() throws a char*
+  lion_halt("uncaught exception");
+}
 void __cxa_call_unexpected(void*) { lion_halt("unexpected"); }
 void __cxa_begin_catch() { lion_halt("catch"); }
 void __cxa_end_catch() {}

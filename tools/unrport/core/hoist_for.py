@@ -6,7 +6,7 @@ Usage: hoist_for.py <source.cpp> <clang args...>   (edits the work copy, headers
 import re, subprocess, sys, pathlib
 
 src, flags = sys.argv[1], sys.argv[2:]
-decl = re.compile(r'for\s*\(\s*((?:unsigned\s+|const\s+)*[A-Za-z_][\w:]*(?:<[^>;]*>)?[\s\*&]+)(\w+)\s*=')
+decl = re.compile(r'for\s*\(\s*((?:unsigned\s+|const\s+)*[A-Za-z_][\w:]*(?:<[^>;]*>)?[\s\*&]+)(\w+)\s*=([^;]*);')
 ctor = re.compile(r'for\s*\(\s*([A-Za-z_][\w:]*<[^>;]*>\s+)(\w+)\s*(\([^;]*\))\s*;')
 hoisted = re.compile(r'^(\s*)((?:unsigned\s+|const\s+)*[A-Za-z_][\w:]*(?:<[^>;]*>)?[\s\*&]+)(\w+); for\( (\w+)\s*=')
 
@@ -31,10 +31,13 @@ for round_ in range(60):
                 continue
             for i in range(line - 1, max(line - 400, -1), -1):
                 m = decl.search(lines[i])
-                if m and m.group(2) == name:
-                    if i not in edits:
-                        edits[i] = lines[i][:m.start()] + m.group(1) + name + "; for( " + name + " =" + lines[i][m.end():]
-                    break
+                if m:
+                    names = [m.group(2)] + re.findall(r',\s*(\w+)\s*=', m.group(3))
+                    if name in names:
+                        if i not in edits:
+                            edits[i] = (lines[i][:m.start()] + m.group(1) + ", ".join(names) + "; for( " + m.group(2) + " =" +
+                                        m.group(3) + ";" + lines[i][m.end():])
+                        break
                 m = ctor.search(lines[i])
                 if m and m.group(2) == name:
                     if i not in edits:

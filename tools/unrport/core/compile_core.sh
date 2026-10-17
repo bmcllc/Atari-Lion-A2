@@ -8,8 +8,8 @@ shift
 res="$(clang --print-resource-dir)/include"
 flags=(--target=powerpc-unknown-none-elf -mcpu=7400 -mno-altivec -mno-vsx -O2 -w -Wno-non-pod-varargs
        -fms-extensions -fms-compatibility -fdelayed-template-parsing -D_MSC_VER=1200 -std=gnu++03
-       -fexceptions -fno-rtti -fno-pic -fno-stack-protector -ffreestanding -fno-threadsafe-statics
-       -DCORE_EXPORTS -nostdinc -nostdinc++ -isystem "$res" -isystem "$here/shim"
+       -fexceptions -fno-rtti -mms-bitfields -fpack-struct=4 -fno-pic -fno-stack-protector -ffreestanding -fno-threadsafe-statics
+       -DCORE_EXPORTS -DGPackage=GPackage_Core -DhInstance=hInstance_Core -DDllMain=DllMain_Core -nostdinc -nostdinc++ -isystem "$res" -isystem "$here/shim"
        -I"$work/Inc" -I"$work/Src" -I"$here")
 mkdir -p "$work/obj"
 objs=()
