@@ -17,6 +17,7 @@ endif()
 add_library(lioncore STATIC
   src/bus.cpp
   src/bootrom.cpp
+  src/rom/assets.cpp
   src/cdrom.cpp
   src/pic.cpp
   src/vi.cpp
@@ -61,6 +62,7 @@ add_executable(lion_tests
   tests/test_mmu.cpp
   tests/test_cdrom.cpp
   tests/test_tyke.cpp
+  tests/test_dashboard.cpp
 )
 target_link_libraries(lion_tests PRIVATE lioncore lionasm)
 add_test(NAME lion_tests COMMAND lion_tests)

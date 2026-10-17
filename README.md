@@ -12,9 +12,27 @@ Referência de hardware do emulador: [docs/hardware.md](docs/hardware.md).
 | Spike   | Rasterizador: Z24, Gouraud, textura com perspectiva, bilinear, mipmap e trilinear |
 | Tyke    | DSP de 40 MHz com conjunto de instruções próprio; firmware de mixagem de 24 canais |
 | CD-ROM  | Drive 12× com busca, DMA e interrupção                                |
-| Boot ROM | Código PowerPC: carrega o firmware do Tyke e dá boot em `BOOT.LION` do disco |
+| Boot ROM | Código PowerPC: intro com jingle, dashboard 3D e boot de `BOOT.LION` do disco |
 | Barramento | Disputa pela SDRAM entre Tuffy, Quacker, DMA do CD e Tyke          |
 | VI/PIC/Controles | 240p/480i/480p, interrupções, 4 portas analógico + digital   |
+
+![Intro](docs/img/intro.png) ![Dashboard](docs/img/dashboard.png)
+
+## Dashboard
+
+Ligado sem disco (`./build/lion`), o console toca a intro e abre o dashboard, no estilo dos
+consoles de sexta geração com a cara do Lion:
+- **visual:** grade vermelha rolando até o horizonte e o emblema girando no cabeçalho;
+- **menu:** cards 3D DISC, AUDIO (teste de som com as 24 vozes do Tyke) e SYSTEM
+  (informações do hardware).
+
+Tudo roda na própria Boot ROM, em PowerPC, desenhando pela Spike e tocando pelo Tyke.
+
+- ← → escolhem, A ou Enter confirmam, B (tecla X) volta
+- arraste um ISO para a janela para inserir o disco; F9 ejeta
+- `--fast-boot` simula uma unidade de desenvolvimento: sem intro, o disco dá boot na hora
+
+Detalhes em [docs/hardware.md](docs/hardware.md#boot-rom-e-dashboard).
 
 ## Compilar
 
@@ -49,7 +67,8 @@ Opções úteis:
 
 - `--headless --frames N`: roda sem janela e mostra estatísticas
 - `--dump frame.ppm`: salva o último frame (implica `--headless`)
-- o `lion` aceita imagens `.lion` e discos ISO9660; sem argumento, liga o console com o drive vazio
+- o `lion` aceita imagens `.lion` e discos ISO9660; sem argumento, liga o console no dashboard
+- `--fast-boot`: pula a intro (unidade de desenvolvimento)
 - `--strict-7400`: `fsqrt`/`fsqrts` viram instruções ilegais, como no 7400 comercial
 - `--trace-tuffy`, `--trace-quacker`: rastreia cada instrução
 - `--verbose`, `--scale N`
@@ -73,7 +92,8 @@ src/            núcleo (biblioteca lioncore) e frontend SDL2 (main.cpp)
   cache.h       modelo de cache usado pelas duas CPUs
   spike/        processador de comandos e rasterizador
   tyke/         DSP Tyke e firmware de mixagem
-  bootrom.cpp    Boot ROM (montada em código PowerPC)
+  bootrom.cpp   Boot ROM: intro, dashboard e loader (montados em código PowerPC)
+  rom/          dados da ROM: fonte, malhas 3D, samples, jingle, animação da intro
   dispatch.h    modelo de despacho duplo e previsão de desvio
 tools/          montadores PPC/88k/Tyke, gravador de ISO9660, demo e mkdemo
 tests/          testes unitários e de sistema

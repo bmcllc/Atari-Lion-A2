@@ -63,6 +63,7 @@ class Tyke : public MmioDevice {
   bool running_ = false;
   bool waiting_ = false;
   u64 now_ = 0;         // Tyke cycles since power-on
+  u64 target_ = 0;      // where now_ should be at the end of the current run()
   u64 ticks_done_ = 0;  // 44.1 kHz output periods consumed by WAIT
   u64 tick_cycle(u64 n) const { return n * kHz / kAudioRate; }
   u32 sample_count_ = 0;

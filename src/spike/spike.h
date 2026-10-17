@@ -24,6 +24,7 @@ class Spike : public MmioDevice {
     kCullBack = 1u << 7,
     kMipmap = 1u << 8,     // per-pixel level of detail
     kTrilinear = 1u << 9,  // blend the two nearest levels
+    kBlendAdd = 1u << 10,  // additive blending: dst + src * alpha (glows, text)
   };
   static constexpr size_t kFifoWords = 4096;
   static constexpr u32 kPixelsPerCycle = 2;
@@ -36,7 +37,7 @@ class Spike : public MmioDevice {
     float u, v;
   };
 
-  static constexpr u64 kParallelArea = 16 * 1024;  // bounding boxes worth splitting
+  static constexpr u64 kParallelArea = 8 * 1024;  // bounding boxes worth splitting
 
   Spike(Bus& bus, Pic& pic) : bus_(bus), pic_(pic), fifo_(kFifoWords) {
     const unsigned hw = std::thread::hardware_concurrency();

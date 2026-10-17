@@ -1,10 +1,11 @@
 // Atari Lion A2 emulator — SDL2 frontend.
 //
 //   lion [image.lion | disc.iso] [--frames N] [--dump frame.ppm] [--headless] [--verbose]
-//                     [--trace-tuffy] [--trace-quacker] [--scale N]
+//                     [--trace-tuffy] [--trace-quacker] [--scale N] [--fast-boot]
 //
 // Keyboard (port 1): arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Q/W = L/R,
 // Enter = Start, Right Shift = Select. Game controllers fill ports 1-4.
+// Drop a disc image on the window to insert it; F9 ejects.
 #include <SDL.h>
 
 #include <chrono>
@@ -25,13 +26,16 @@ struct Options {
   std::string dump;
   bool headless = false;
   int scale = 2;
+  bool fast_boot = false;
 };
 
 void usage() {
   std::fprintf(stderr,
                "usage: lion [image.lion | disc.iso] [--frames N] [--dump out.ppm] [--headless]\n"
                "            [--verbose] [--trace-tuffy] [--trace-quacker] [--scale N] [--strict-7400]\n"
-               "With no image, the console boots with an empty CD drive.\n");
+               "            [--fast-boot]\n"
+               "With no image, the console starts its dashboard with an empty CD drive.\n"
+               "--fast-boot straps the board as a development unit: no intro, discs boot at once.\n");
 }
 
 bool write_ppm(const std::string& path, const std::vector<u32>& px, int w, int h) {
@@ -138,16 +142,18 @@ int main(int argc, char** argv) {
     else if (a == "--headless") opt.headless = true;
     else if (a == "--verbose") lion::g_verbose = true;
     else if (a == "--scale") opt.scale = std::max(1, std::atoi(next()));
+    else if (a == "--fast-boot") opt.fast_boot = true;
     else if (a == "--trace-tuffy" || a == "--trace-quacker" || a == "--strict-7400") continue;  // after boot
     else if (a == "-h" || a == "--help") { usage(); return 0; }
     else if (opt.image.empty() && a[0] != '-') opt.image = a;
     else { usage(); return 2; }
   }
   auto sys = std::make_unique<lion::Lion>();
+  if (opt.fast_boot) sys->pic.straps |= lion::Pic::kStrapFastBoot;
   std::string err;
   std::vector<u8> file;
   if (opt.image.empty()) {
-    sys->power_on();  // empty drive: the boot ROM asks for a disc
+    sys->power_on();  // empty drive: the boot ROM runs its dashboard
   } else if (!lion::read_file(opt.image, &file)) {
     std::fprintf(stderr, "cannot read %s\n", opt.image.c_str());
     return 1;
@@ -212,6 +218,16 @@ int main(int argc, char** argv) {
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_QUIT) quit = true;
       if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) quit = true;
+      if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F9) sys->cd.eject();
+      if (e.type == SDL_DROPFILE) {
+        // Hot-insert a disc; the dashboard notices and reads its label.
+        std::vector<u8> disc;
+        if (lion::read_file(e.drop.file, &disc) && disc.size() > 0x8006 && std::memcmp(&disc[0x8001], "CD001", 5) == 0)
+          sys->cd.insert(std::move(disc));
+        else
+          std::fprintf(stderr, "%s: not an ISO9660 disc image\n", e.drop.file);
+        SDL_free(e.drop.file);
+      }
       if (e.type == SDL_CONTROLLERDEVICEADDED) {
         for (auto& p : pads)
           if (!p) {

@@ -74,6 +74,7 @@ TEST(cdrom_errors) {
 
 TEST(cdrom_boot_rom_loads_disc) {
   Lion sys;
+  sys.pic.straps = lion::Pic::kStrapFastBoot;  // no intro: straight to the disc
   std::string err;
   CHECK(sys.boot_disc(demo::build_disc(), &err));
   CHECK(sys.in_boot_rom());
@@ -98,21 +99,4 @@ TEST(cdrom_boot_rom_loads_disc) {
   for (const auto& seg : img.segments)
     CHECK(std::equal(seg.data.begin(), seg.data.end(), sys.bus.host_ptr(seg.addr)));
   CHECK_EQ(sys.tuffy.illegal_count, 0u);
-}
-
-TEST(cdrom_boot_rom_error_screens) {
-  auto screen = [](Lion& sys) {
-    for (int i = 0; i < 30; ++i) sys.run_frame();
-    std::vector<u32> px;
-    sys.vi.scanout(px);
-    return px.empty() ? 0u : px[px.size() / 2];
-  };
-  Lion empty;
-  empty.power_on();
-  CHECK_EQ(screen(empty), 0x0000FFu);  // blue: insert a disc
-  Lion bad;
-  std::string err;
-  CHECK(!bad.boot_disc(iso9660::build("EMPTY", {{"README.TXT", pattern(10, 1)}}), &err));
-  CHECK(err.find("BOOT.LION") != std::string::npos);
-  CHECK_EQ(screen(bad), 0xFF0000u);  // red: no bootable program
 }

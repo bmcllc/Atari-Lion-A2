@@ -125,7 +125,8 @@ Cada comando começa com um cabeçalho `(opcode << 24) | número_de_palavras_de_
 
 Flags de `SET_MODE`: bit 0 Z test (LESS), bit 1 Z write, bit 2 Gouraud, bit 3 textura,
 bit 4 bilinear, bit 5 perspectiva, bit 6 alpha blend, bit 7 culling de faces traseiras,
-bit 8 mipmapping, bit 9 trilinear (mistura os dois níveis mais próximos).
+bit 8 mipmapping, bit 9 trilinear (mistura os dois níveis mais próximos), bit 10 blend
+aditivo (`destino + fonte × alfa`, saturado; para brilhos e texto).
 
 Mipmaps: os níveis ficam em sequência a partir do endereço da textura, cada um com metade
 da largura e da altura do anterior (mínimo 1×1). O nível é escolhido por pixel a partir da
@@ -154,6 +155,7 @@ O VBlank começa na linha 480 (ou 240 em 240p) e levanta PIC bit 0.
 | ------ | ------- | ----------------------------------------------- |
 | `0x00` | PENDING | Leitura: pendentes. Escrita: 1 limpa o bit      |
 | `0x04` | MASK    | 1 = habilitada                                  |
+| `0x08` | STRAPS  | Somente leitura: jumpers da placa. Bit 0 = unidade de desenvolvimento (boot rápido) |
 
 Fontes: bit 0 VBLANK, bit 1 SPIKE, bit 2 QUACKER, bit 3 TYKE, bit 4 PAD, bit 5 CD.
 `PENDING & MASK ≠ 0` aciona a exceção externa (`0x500`) do Tuffy quando `MSR[EE] = 1`.
@@ -266,19 +268,48 @@ Cabeçalho big-endian:
 | `0x0C` | nº de segmentos |
 | `0x10` | segmentos: `{endereço de carga, tamanho, offset no arquivo}` × N |
 
-## Boot ROM
+## Boot ROM e dashboard
 
-A ROM é código PowerPC de verdade (gerado por `src/bootrom.cpp`), executado a partir do reset
-em `0xFFF0_0100` com `MSR[IP] = 1`:
+A ROM é código PowerPC de verdade (gerado por `src/bootrom.cpp`, com fonte, malhas, samples e
+tabelas de animação de `src/rom/assets.cpp`), executado a partir do reset em `0xFFF0_0100`
+com `MSR[IP] = 1`:
 
-1. carrega o firmware de mixagem na RAM de programa do Tyke e liga o DSP;
-2. espera um disco; com o drive vazio, mostra uma tela azul;
-3. lê o descritor de volume (setor 16) e o diretório raiz do ISO9660 pelo drive;
-4. procura `BOOT.LION;1`, lê o arquivo, confere o cabeçalho e copia os segmentos;
-5. entra no jogo em `entry` com `MSR = ME | FP | VEC` e `r1` no topo da SDRAM.
+1. carrega o firmware de mixagem na RAM de programa do Tyke, liga o DSP e copia a fonte para
+   a SGRAM;
+2. **intro** (4 s): o emblema do Lion (três barras dentro de um anel com uma juba de raios)
+   entra girando sobre um brilho vermelho, com flash e o jingle de abertura: rugido, acorde
+   de sinos em Lá maior e pad. Start ou A pulam para o fim;
+3. com um disco no drive, dá boot nele; sem disco, abre o **dashboard**;
+4. o loader lê o descritor de volume (setor 16) e o diretório raiz do ISO9660, procura
+   `BOOT.LION;1`, confere o cabeçalho, copia os segmentos, silencia o Tyke, mascara as
+   interrupções e entra no jogo em `entry` com `MSR = ME | FP | VEC` e `r1` no topo da SDRAM.
 
-Se o disco não tem `BOOT.LION` válido, ou ocorre alguma exceção durante o boot, a ROM mostra uma
-tela vermelha. O disco continua no drive para o jogo ler o resto.
+O dashboard roda a 60 fps em 480p com buffer duplo:
+- **Cena:** céu em degradê, grade de chão rolando em direção à câmera (blend aditivo) e o
+  emblema girando no cabeçalho.
+- **Menu:** três cards com ícones 3D (DISC, AUDIO e SYSTEM). O card escolhido cresce,
+  balança e ganha um brilho pulsante.
+- **Desenho:** tudo sai da Spike por uma FIFO que o Tuffy preenche. O QVE projeta as malhas,
+  com sombreamento plano por face calculado no Tuffy. Entre frames o Tuffy dorme
+  (`MSR[POW]`) e acorda com as interrupções de VBlank e da Spike.
+
+| Item   | A / Start                                                                 |
+| ------ | ------------------------------------------------------------------------- |
+| DISC   | dá boot no disco (fade e tela LOADING com o rótulo do volume)            |
+| AUDIO  | teste de som: toca o jingle e mostra as 24 vozes do Tyke                  |
+| SYSTEM | painel com os chips, a memória e a versão da ROM                          |
+
+← e → escolhem; B fecha os painéis. Os efeitos de navegação usam as vozes 21–23 do mixer.
+O drive é acompanhado sem bloquear: ao inserir um disco, o dashboard lê o rótulo do volume
+(`READING DISC...`, depois `PLAY DISC` e o rótulo). Se o disco não tem `BOOT.LION` válido,
+a ROM volta ao dashboard com `THIS DISC CANNOT BE PLAYED`. Uma exceção inesperada mostra uma
+tela vermelha.
+
+Estado em SDRAM (`0x00A0_0000`, ver `bootrom.h`): cena, estado do disco, item escolhido,
+painel aberto, rótulo do volume.
+
+Com `PIC.STRAPS` bit 0 (unidade de desenvolvimento, opção `--fast-boot`), não há intro: com
+disco, o boot é imediato; sem disco, o dashboard abre direto.
 
 **Boot de desenvolvimento** (imagens `.lion` sem disco): o emulador copia os segmentos direto
 na memória e carrega o firmware do Tyke, como um kit de desenvolvimento. O Tuffy começa em `entry` com
@@ -337,6 +368,8 @@ As codificações seguem a tabela de opcodes do GNU binutils (`m88k-opcode.h`, e
 - **Spike:** rasterizador com Z24, Gouraud, textura bilinear com perspectiva, mipmapping e
   filtragem trilinear, blend e culling. No emulador, triângulos grandes são divididos em faixas
   de linhas entre várias threads, com o mesmo resultado de uma thread só.
-- **Tyke:** DSP programável com firmware de mixagem de 24 canais.
-- **CD-ROM:** drive 12× com busca, DMA e interrupção; Boot ROM em código PowerPC.
+- **Tyke:** DSP programável com firmware de mixagem de 24 canais. O relógio do DSP é absoluto:
+  esperas pelo barramento são compensadas nas fatias seguintes.
+- **CD-ROM:** drive 12× com busca, DMA e interrupção.
+- **Boot ROM:** intro, dashboard e loader em código PowerPC.
 - **Barramento:** disputa pela SDRAM entre os mestres.

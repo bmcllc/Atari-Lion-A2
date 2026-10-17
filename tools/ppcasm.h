@@ -37,6 +37,7 @@ inline u32 mulli(u32 d, u32 a, int16_t i) { return D(7, d, a, u32(i)); }
 inline u32 ori(u32 a, u32 s, u32 i) { return D(24, s, a, i); }
 inline u32 oris(u32 a, u32 s, u32 i) { return D(25, s, a, i); }
 inline u32 xori(u32 a, u32 s, u32 i) { return D(26, s, a, i); }
+inline u32 xoris(u32 a, u32 s, u32 i) { return D(27, s, a, i); }
 inline u32 andi_(u32 a, u32 s, u32 i) { return D(28, s, a, i); }
 inline u32 nop() { return ori(0, 0, 0); }
 inline u32 cmpwi(u32 crf, u32 a, int16_t i) { return D(11, crf << 2, a, u32(i)); }
@@ -110,6 +111,10 @@ inline u32 fmadd(u32 d, u32 a, u32 c, u32 b) { return A(63, d, a, b, c, 29); }
 inline u32 fadds(u32 d, u32 a, u32 b) { return A(59, d, a, b, 0, 21); }
 inline u32 fmuls(u32 d, u32 a, u32 c) { return A(59, d, a, 0, c, 25); }
 inline u32 fmadds(u32 d, u32 a, u32 c, u32 b) { return A(59, d, a, b, c, 29); }
+inline u32 fsubs(u32 d, u32 a, u32 b) { return A(59, d, a, b, 0, 20); }
+inline u32 fdivs(u32 d, u32 a, u32 b) { return A(59, d, a, b, 0, 18); }
+inline u32 fsel(u32 d, u32 a, u32 c, u32 b) { return A(63, d, a, b, c, 23); }
+inline u32 fabs_(u32 d, u32 b) { return X(63, d, 0, b, 264); }
 inline u32 fcmpu(u32 crf, u32 a, u32 b) { return X(63, crf << 2, a, b, 0); }
 inline u32 fctiwz(u32 d, u32 b) { return X(63, d, 0, b, 15); }
 inline u32 frsp(u32 d, u32 b) { return X(63, d, 0, b, 12); }

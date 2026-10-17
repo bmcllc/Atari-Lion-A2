@@ -52,10 +52,13 @@ void Tyke::write32(u32 offset, u32 value, Master, bool*) {
 }
 
 void Tyke::run(u64 cycles) {
-  const u64 end = now_ + cycles;
+  // The target is absolute: cycles spent stalled on the bus are paid back from
+  // the next slices instead of pushing the DSP's clock ahead of the system.
+  target_ += cycles;
+  const u64 end = target_;
   total_cycles += cycles;
   if (!running_) {
-    now_ = end;
+    now_ = std::max(now_, end);
     return;
   }
   while (now_ < end) {

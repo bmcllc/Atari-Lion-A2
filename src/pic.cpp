@@ -6,6 +6,7 @@ u32 Pic::read32(u32 offset, Master, bool*) {
   switch (offset) {
     case 0x00: return pending_;
     case 0x04: return mask_;
+    case 0x08: return straps;
   }
   return 0;
 }

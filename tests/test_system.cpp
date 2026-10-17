@@ -69,6 +69,7 @@ TEST(demo_renders_cube) {
 TEST(demo_disc_textured_cube) {
   Lion sys;
   std::string err;
+  sys.pic.straps = lion::Pic::kStrapFastBoot;
   CHECK(sys.boot_disc(demo::build_disc(), &err));
   // Boot ROM load, then the game's own texture read: give it some frames.
   for (int i = 0; i < 60; ++i) sys.run_frame();
@@ -215,6 +216,7 @@ TEST(threaded_rasterizer_is_deterministic) {
     Lion sys;
     sys.spike.set_threads(threads);
     std::string err;
+    sys.pic.straps = lion::Pic::kStrapFastBoot;
     sys.boot_disc(demo::build_disc(), &err);
     for (int i = 0; i < 90; ++i) sys.run_frame();
     std::vector<u32> px;

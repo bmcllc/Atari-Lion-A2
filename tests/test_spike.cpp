@@ -126,3 +126,17 @@ TEST(spike_mipmap_level_selection) {
   const u16 tri = draw(Spike::kMipmap | Spike::kTrilinear, 480);  // between levels 1 and 2
   CHECK((tri & 0x07E0) != 0 && (tri & 0x001F) != 0);
 }
+
+TEST(spike_additive_blend) {
+  Lion sys;
+  setup(sys, 0);
+  tri(sys, 0.5f, 0xFF80'0000, {0, 0, 0, 400, 400, 0});  // dark red underneath
+  push(sys, {Spike::kSetMode << 24 | 1, Spike::kBlendAdd});
+  tri(sys, 0.5f, 0xFF00'0080, {0, 0, 0, 400, 400, 0});  // add blue
+  tri(sys, 0.5f, 0xFFC0'0000, {0, 0, 0, 400, 400, 0});  // add red: saturates
+  sys.spike.flush();
+  const u16 p = pixel(sys, 50, 50);
+  CHECK_EQ(u32(p >> 11), 31u);     // 0x80 + 0xC0 clamps to full red
+  CHECK_EQ(u32(p & 31), 0x80u >> 3);  // blue added on top
+  CHECK_EQ(pixel(sys, 300, 300), 0x0000);
+}

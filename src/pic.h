@@ -20,6 +20,10 @@ class Pic : public MmioDevice {
   bool asserted() const { return (pending_ & mask_) != 0; }
   u32 pending() const { return pending_; }
 
+  // Board straps, read-only at +0x08. Bit 0: development unit (the boot ROM skips its intro).
+  enum Strap : u32 { kStrapFastBoot = 1u << 0 };
+  u32 straps = 0;
+
   u32 read32(u32 offset, Master who, bool* stall) override;
   void write32(u32 offset, u32 value, Master who, bool* stall) override;
 

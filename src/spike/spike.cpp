@@ -228,7 +228,8 @@ void Spike::draw_triangle(const Vertex in[3]) {
   u8* const zbuf = (mode & (kZTest | kZWrite)) ? bus_.host_range(z_addr_, width * height * 4) : nullptr;
   if (!color) return;
 
-  const bool persp = mode & kPerspective, gouraud = mode & kGouraud, blend = mode & kBlend;
+  const bool persp = mode & kPerspective, gouraud = mode & kGouraud, blend = mode & (kBlend | kBlendAdd);
+  const bool additive = mode & kBlendAdd;
   const bool ztest = zbuf && (mode & kZTest), zwrite = zbuf && (mode & kZWrite);
   const bool textured = mode & kTexture;
   const bool mip = textured && (mode & kMipmap) && tex_levels_ > 1;
@@ -245,7 +246,63 @@ void Spike::draw_triangle(const Vertex in[3]) {
     E[k] = ((X[b] - X[a]) * (-Y[a]) - (Y[b] - Y[a]) * (-X[a])) * inv_area;
   }
 
-  // Perspective-correct weights from linear barycentrics.
+  // Perspective-correct weights from linear barycentrics (see raster_rows).
+
+  // Rows are independent: large triangles are split into bands across threads.
+  // The pixel loop works on copies: the framebuffer is written through byte
+  // pointers, which would force every captured value to be reloaded per pixel.
+  const auto& o_E = E;
+  const auto& o_DX = DX;
+  const auto& o_DY = DY;
+  const auto& o_Z = Z;
+  const auto& o_IW = IW;
+  const auto& o_U = U;
+  const auto& o_V = V;
+  const auto& o_CR = CR;
+  const auto& o_CG = CG;
+  const auto& o_CB = CB;
+  const auto& o_CA = CA;
+  const auto& o_persp = persp;
+  const auto& o_gouraud = gouraud;
+  const auto& o_additive = additive;
+  const auto& o_ztest = ztest;
+  const auto& o_zwrite = zwrite;
+  const auto& o_mip = mip;
+  const auto& o_tex_w = tex_w;
+  const auto& o_tex_h = tex_h;
+  const auto& o_minx = minx;
+  const auto& o_maxx = maxx;
+  const auto& o_stride = stride;
+  const auto& o_width = width;
+  const auto& o_color = color;
+  const auto& o_zbuf = zbuf;
+  // Specialised on the features that change the per-pixel work the most.
+  auto raster_rows = [&]<bool kTex, bool kBlend, bool kZ>(int y_begin, int y_end) -> u64 {
+  const float E[3] = {o_E[0], o_E[1], o_E[2]};
+  const float DX[3] = {o_DX[0], o_DX[1], o_DX[2]};
+  const float DY[3] = {o_DY[0], o_DY[1], o_DY[2]};
+  const float Z[3] = {o_Z[0], o_Z[1], o_Z[2]};
+  const float IW[3] = {o_IW[0], o_IW[1], o_IW[2]};
+  const float U[3] = {o_U[0], o_U[1], o_U[2]};
+  const float V[3] = {o_V[0], o_V[1], o_V[2]};
+  const float CR[3] = {o_CR[0], o_CR[1], o_CR[2]};
+  const float CG[3] = {o_CG[0], o_CG[1], o_CG[2]};
+  const float CB[3] = {o_CB[0], o_CB[1], o_CB[2]};
+  const float CA[3] = {o_CA[0], o_CA[1], o_CA[2]};
+  const auto persp = o_persp;
+  const auto gouraud = o_gouraud;
+  const auto additive = o_additive;
+  const auto ztest = o_ztest;
+  const auto zwrite = o_zwrite;
+  const auto mip = o_mip;
+  const auto tex_w = o_tex_w;
+  const auto tex_h = o_tex_h;
+  const auto minx = o_minx;
+  const auto maxx = o_maxx;
+  const auto stride = o_stride;
+  const auto width = o_width;
+  const auto color = o_color;
+  const auto zbuf = o_zbuf;
   auto correct = [&](float b0, float b1, float b2, float* q) {
     q[0] = b0, q[1] = b1, q[2] = b2;
     if (persp) {
@@ -257,23 +314,35 @@ void Spike::draw_triangle(const Vertex in[3]) {
       }
     }
   };
-
-  // Rows are independent: large triangles are split into bands across threads.
-  auto raster_rows = [&](int y_begin, int y_end) -> u64 {
   u64 drawn = 0;
   for (int y = y_begin; y < y_end; ++y) {
     const float py = float(y) + 0.5f;
     u8* const crow = color + size_t(y) * stride;
-    float w0 = E[0] + DY[0] * py + DX[0] * (float(minx) + 0.5f);
-    float w1 = E[1] + DY[1] * py + DX[1] * (float(minx) + 0.5f);
-    float w2 = E[2] + DY[2] * py + DX[2] * (float(minx) + 0.5f);
-    for (int x = minx; x <= maxx; ++x, w0 += DX[0], w1 += DX[1], w2 += DX[2]) {
+    // Span of this row inside all three edges (one pixel of margin; the per-pixel
+    // test below stays exact). Thin diagonal triangles have huge bounding boxes.
+    float lo = float(minx), hi = float(maxx);
+    for (int k = 0; k < 3; ++k) {
+      const float at = E[k] + DY[k] * py + DX[k] * 0.5f;  // weight at x = 0
+      if (DX[k] > 0) lo = std::max(lo, -at / DX[k] - 1.0f);
+      else if (DX[k] < 0) hi = std::min(hi, at / -DX[k] + 1.0f);
+      else if (at < 0) hi = lo - 1.0f;
+    }
+    if (!(lo <= hi)) continue;
+    const int x0 = std::max(minx, int(lo)), x1 = std::min(maxx, int(hi) + 1);
+    float w0 = E[0] + DY[0] * py + DX[0] * (float(x0) + 0.5f);
+    float w1 = E[1] + DY[1] * py + DX[1] * (float(x0) + 0.5f);
+    float w2 = E[2] + DY[2] * py + DX[2] * (float(x0) + 0.5f);
+    for (int x = x0; x <= x1; ++x, w0 += DX[0], w1 += DX[1], w2 += DX[2]) {
       if (w0 < 0 || w1 < 0 || w2 < 0) continue;
 
-      const float z = w0 * Z[0] + w1 * Z[1] + w2 * Z[2];
-      const u32 z24 = u32(std::clamp(z, 0.0f, 1.0f) * float(0xFFFFFF));
-      u8* const zp = zbuf ? zbuf + (size_t(y) * width + size_t(x)) * 4 : nullptr;
-      if (ztest && z24 >= (load_be32(zp) & 0xFFFFFF)) continue;
+      u32 z24 = 0;
+      u8* zp = nullptr;
+      if constexpr (kZ) {
+        const float z = w0 * Z[0] + w1 * Z[1] + w2 * Z[2];
+        z24 = u32(int(std::clamp(z, 0.0f, 1.0f) * float(0xFFFFFF)));
+        zp = zbuf + (size_t(y) * width + size_t(x)) * 4;
+        if (ztest && z24 >= (load_be32(zp) & 0xFFFFFF)) continue;
+      }
 
       float q[3];
       correct(w0, w1, w2, q);
@@ -287,7 +356,7 @@ void Spike::draw_triangle(const Vertex in[3]) {
       } else {
         r = CR[0], g = CG[0], b = CB[0], a = CA[0];
       }
-      if (textured) {
+      if constexpr (kTex) {
         const float u = q[0] * U[0] + q[1] * U[1] + q[2] * U[2];
         const float tv = q[0] * V[0] + q[1] * V[1] + q[2] * V[2];
         float lod = 0.0f;
@@ -310,20 +379,35 @@ void Spike::draw_triangle(const Vertex in[3]) {
         b *= float(t & 0xFF) * k;
       }
       u8* const cp = crow + size_t(x) * 2;
-      if (blend) {
+      if constexpr (kBlend) {
         const float al = a / 255.0f;
         const u32 dst = rgb565_to_xrgb(load_be16(cp));
-        r = r * al + float((dst >> 16) & 0xFF) * (1 - al);
-        g = g * al + float((dst >> 8) & 0xFF) * (1 - al);
-        b = b * al + float(dst & 0xFF) * (1 - al);
+        const float keep = additive ? 1.0f : 1.0f - al;
+        r = r * al + float((dst >> 16) & 0xFF) * keep;
+        g = g * al + float((dst >> 8) & 0xFF) * keep;
+        b = b * al + float(dst & 0xFF) * keep;
       }
-      store_be16(cp, xrgb_to_rgb565(u32(std::clamp(r, 0.0f, 255.0f)), u32(std::clamp(g, 0.0f, 255.0f)),
-                                    u32(std::clamp(b, 0.0f, 255.0f))));
-      if (zwrite) store_be32(zp, (load_be32(zp) & 0xFF00'0000u) | z24);
+      store_be16(cp, xrgb_to_rgb565(u32(int(std::clamp(r, 0.0f, 255.0f))), u32(int(std::clamp(g, 0.0f, 255.0f))),
+                                    u32(int(std::clamp(b, 0.0f, 255.0f)))));
+      if (kZ && zwrite) store_be32(zp, (load_be32(zp) & 0xFF00'0000u) | z24);
       ++drawn;
     }
   }
   return drawn;
+  };
+
+  auto rasterize = [&](int y0, int y1) -> u64 {
+    const int key = (textured ? 4 : 0) | (blend ? 2 : 0) | (zbuf ? 1 : 0);
+    switch (key) {
+      case 0: return raster_rows.template operator()<false, false, false>(y0, y1);
+      case 1: return raster_rows.template operator()<false, false, true>(y0, y1);
+      case 2: return raster_rows.template operator()<false, true, false>(y0, y1);
+      case 3: return raster_rows.template operator()<false, true, true>(y0, y1);
+      case 4: return raster_rows.template operator()<true, false, false>(y0, y1);
+      case 5: return raster_rows.template operator()<true, false, true>(y0, y1);
+      case 6: return raster_rows.template operator()<true, true, false>(y0, y1);
+      default: return raster_rows.template operator()<true, true, true>(y0, y1);
+    }
   };
 
   const int rows = maxy - miny + 1;
@@ -333,11 +417,11 @@ void Spike::draw_triangle(const Vertex in[3]) {
     std::vector<u64> counts(bands, 0);
     pool_->run(bands, [&](unsigned i) {
       const int y0 = miny + int(u64(rows) * i / bands), y1 = miny + int(u64(rows) * (i + 1) / bands);
-      counts[i] = raster_rows(y0, y1);
+      counts[i] = rasterize(y0, y1);
     });
     for (u64 c : counts) pixels_ += c;
   } else {
-    pixels_ += raster_rows(miny, maxy + 1);
+    pixels_ += rasterize(miny, maxy + 1);
   }
 }
 
