@@ -12,25 +12,59 @@ Referência de hardware do emulador: [docs/hardware.md](docs/hardware.md).
 | Spike   | Rasterizador: Z24, Gouraud, textura com perspectiva, bilinear, mipmap e trilinear |
 | Tyke    | DSP de 40 MHz com conjunto de instruções próprio; firmware de mixagem de 24 canais |
 | CD-ROM  | Drive 12× com busca, DMA e interrupção                                |
-| Boot ROM | Código PowerPC: intro com jingle, dashboard 3D e boot de `BOOT.LION` do disco |
+| Boot ROM | Código PowerPC: intro, dashboard 3D com player de CD, temas sonoros, ajustes do Tyke e visualizadores, boot de `BOOT.LION` |
 | Barramento | Disputa pela SDRAM entre Tuffy, Quacker, DMA do CD e Tyke          |
 | VI/PIC/Controles | 240p/480i/480p, interrupções, 4 portas analógico + digital   |
 
-![Intro](docs/img/intro.png) ![Dashboard](docs/img/dashboard.png)
+![Intro: as garras rasgam a placa](docs/img/intro_tear.png) ![Intro: o Lion A2 coroado](docs/img/intro.png)
+![Dashboard](docs/img/dashboard.png) ![Player de CD](docs/img/music.png)
 
 ## Dashboard
 
-Ligado sem disco (`./build/lion`), o console toca a intro e abre o dashboard, no estilo dos
-consoles de sexta geração com a cara do Lion:
-- **visual:** grade vermelha rolando até o horizonte e o emblema girando no cabeçalho;
-- **menu:** cards 3D DISC, AUDIO (teste de som com as 24 vozes do Tyke) e SYSTEM
-  (informações do hardware).
+Ao ligar, o console toca a intro:
+1. o leão ruge;
+2. três garradas rasgam uma placa "JAGUAR";
+3. surge o emblema do Lion A2, e uma coroa cai sobre a juba.
+
+Depois abre o dashboard, no estilo dos consoles de sexta geração com a cara do Lion: grade
+vermelha rolando até o horizonte e cinco cards 3D.
+
+- **PLAY:** dá boot no jogo do disco.
+- **MUSIC:** player de CD para faixas `.WAV` do disco, com espectro e osciloscópio.
+- **THEME:** escolhe o tema sonoro do dashboard. Os dois primeiros, LION A2 THEME (o padrão) e
+  LION A2 THEME II, são as músicas de `Assets/`. Os outros são sequenciados pela ROM: PRIDE,
+  NEON SAVANNA e NIGHT PLAINS. Há também SILENCE.
+- **TYKE:** volume, graves, agudos e eco do DSP de áudio, com os medidores das 24 vozes e os
+  visualizadores.
+- **SYSTEM:** informações do hardware.
 
 Tudo roda na própria Boot ROM, em PowerPC, desenhando pela Spike e tocando pelo Tyke.
 
-- ← → escolhem, A ou Enter confirmam, B (tecla X) volta
-- arraste um ISO para a janela para inserir o disco; F9 ejeta
-- `--fast-boot` simula uma unidade de desenvolvimento: sem intro, o disco dá boot na hora
+Controles e opções:
+- ← → escolhem, ↑ ↓ navegam nos painéis, A (tecla Z) ou Enter confirmam, B (tecla X) volta;
+- X (tecla A) para a música;
+- arraste um ISO para a janela para inserir o disco; F9 ejeta;
+- `--fast-boot` simula uma unidade de desenvolvimento: sem intro, o disco dá boot na hora.
+
+O rugido, as garras e os dois temas gravados vêm de `Assets/`. Depois de trocar esses arquivos,
+gere de novo a versão que vai para a ROM (requer ffmpeg):
+
+```bash
+cmake --build build --target lionasset
+```
+
+```bash
+tools/convert_assets.sh
+```
+
+Para montar um disco de música:
+
+```bash
+./build/mkdemo --music build/musica.iso faixa1.wav faixa2.wav
+```
+
+Sem arquivos, o comando grava três faixas de demonstração. Os `.wav` precisam ser PCM de
+16 bits, mono ou estéreo, de 8 a 48 kHz.
 
 Detalhes em [docs/hardware.md](docs/hardware.md#boot-rom-e-dashboard).
 
@@ -93,9 +127,12 @@ src/            núcleo (biblioteca lioncore) e frontend SDL2 (main.cpp)
   spike/        processador de comandos e rasterizador
   tyke/         DSP Tyke e firmware de mixagem
   bootrom.cpp   Boot ROM: intro, dashboard e loader (montados em código PowerPC)
-  rom/          dados da ROM: fonte, malhas 3D, samples, jingle, animação da intro
+  rom/          intro, dashboard, player de CD e visualizadores (PowerPC gerado em C++),
+                e os dados: fonte, textura, malhas 3D, samples, jingle, temas, animações
   dispatch.h    modelo de despacho duplo e previsão de desvio
-tools/          montadores PPC/88k/Tyke, gravador de ISO9660, demo e mkdemo
+tools/          montadores PPC/88k/Tyke, gravador de ISO9660, demo, discos de música, mkdemo,
+                conversor de áudio para a ROM (lionasset, convert_assets.sh, IMA ADPCM)
+Assets/         áudio original (intro e temas) e Assets/rom/, a versão convertida para a ROM
 tests/          testes unitários e de sistema
 docs/           referência de hardware
 ```

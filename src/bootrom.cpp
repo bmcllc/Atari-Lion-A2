@@ -12,203 +12,10 @@
 // Everything is drawn by Spike from a FIFO the ROM fills directly: 640x480
 // RGB565, double-buffered, with the QVE projecting the meshes. Tuffy dozes
 // between frames and wakes on the Spike and VBlank interrupts.
-#include "bootrom.h"
-
-#include <cmath>
-#include <map>
-#include <stdexcept>
-#include <string>
-#include <tuple>
-
-#include "bus.h"
-#include "cdrom.h"
-#include "pad.h"
-#include "quacker/qve.h"
-#include "ppcasm.h"
-#include "rom/assets.h"
-#include "spike/spike.h"
-#include "tuffy/ppc.h"
-#include "tyke/firmware.h"
-#include "tyke/tyke.h"
+#include "rom/builder.h"
 
 namespace lion {
-
-namespace {
-
-using namespace ppcasm;
-using namespace bootrom;
-
-constexpr u32 kSectorBuf = 0x00C0'0000;  // volume descriptor and directory
-constexpr u32 kFileBuf = 0x00D0'0000;    // BOOT.LION image
-constexpr u32 kMaxFileSectors = 3000;    // ~6 MB
-constexpr u32 kStack = map::kSdramBase + map::kSdramSize - 0x100;
-constexpr u32 kRed = 0xF800;
-
-constexpr u32 kBufA = map::kSgramBase, kBufB = map::kSgramBase + 640 * 480 * 2;
-constexpr u32 kZBuf = map::kSgramBase + 0x20'0000;
-constexpr u32 kFont = map::kSgramBase + 0x40'0000;
-constexpr u32 kProj = kRam + 0x1'0000;  // QVE output
-
-// Dashboard RAM (offsets from kRam, see bootrom.h for the public ones).
-constexpr u32 kScratch = 0x00, kXform = 0x10, kFade = 0x40, kScroll = 0x44, kEmblemYaw = 0x48, kIconYaw = 0x4C,
-              kCardScale = 0x58, kCardBright = 0x64, kSeqPtr = 0x70, kSeqT = 0x74, kSfxCh = 0x78, kPadPrev = 0x90;
-
-// Global registers, valid everywhere outside the loader.
-constexpr u32 rSpike = 31, rVi = 30, rPic = 29, rCd = 28, rTyke = 27, rPool = 26, rRam = 25, rFrame = 24, rBack = 23,
-              rQve = 16, rPad = 15;
-// f31 = 0.0, f30 = 1.0. Routines may clobber r0, r3-r12, f0-f27, CR and CTR.
-
-constexpr u32 kBaseMsr = Tuffy::kMsrIp | Tuffy::kMsrMe | Tuffy::kMsrFp;
-constexpr u32 kDozeMsr = kBaseMsr | Tuffy::kMsrEe | Tuffy::kMsrPow;
-
-constexpr u32 kM2D = Spike::kGouraud;
-constexpr u32 kMBlend = Spike::kGouraud | Spike::kBlend;
-constexpr u32 kMAdd = Spike::kGouraud | Spike::kBlendAdd;
-constexpr u32 kMText = Spike::kTexture | Spike::kBilinear | Spike::kBlendAdd;
-constexpr u32 kM3D = Spike::kZTest | Spike::kZWrite | Spike::kCullBack;
-constexpr u32 kMGrid = Spike::kBlendAdd | Spike::kGouraud | Spike::kPerspective;
-
-// Constant pool addressed from rPool with 16-bit offsets.
-class Pool {
- public:
-  u32 f(float v) {
-    const u32 bits = f32_to_bits(v);
-    auto it = floats_.find(bits);
-    if (it != floats_.end()) return it->second;
-    const u32 off = u32(words_.size() * 4);
-    words_.push_back(bits);
-    floats_[bits] = off;
-    return off;
-  }
-  u32 d(u64 bits) {
-    if (words_.size() % 2) words_.push_back(0);
-    const u32 off = u32(words_.size() * 4);
-    words_.push_back(u32(bits >> 32));
-    words_.push_back(u32(bits));
-    return off;
-  }
-  u32 table(const std::vector<float>& t) {
-    const u32 off = u32(words_.size() * 4);
-    for (float v : t) words_.push_back(f32_to_bits(v));
-    return off;
-  }
-  const std::vector<u32>& words() const { return words_; }
-
- private:
-  std::vector<u32> words_;
-  std::map<u32, u32> floats_;
-};
-
-class RomBuilder {
- public:
-  std::vector<u8> build();
-
- private:
-  // ---- emit helpers
-  std::string L(const std::string& base) { return base + "#" + std::to_string(uid_++); }
-  int16_t k(float v) { return int16_t(pool_.f(v)); }
-  void lf(u32 fr, float v) { a_ << lfs(fr, k(v), rPool); }
-  void load(u32 r, u32 v) {
-    if (s32(v) >= -32768 && s32(v) < 32768) a_ << li(r, int16_t(v));
-    else a_.li32(r, v);
-  }
-  void push(u32 r) { a_ << stw(r, 0, rSpike); }
-  void pushf(u32 fr) { a_ << stfs(fr, 0, rSpike); }
-  void pushk(u32 v) {
-    load(0, v);
-    push(0);
-  }
-  void tri_header() { pushk(Spike::kTri << 24 | 3 * Spike::kVertexWords); }
-  void vtx(u32 fx, u32 fy, u32 rc) {
-    pushf(fx), pushf(fy), pushf(31), pushf(30), push(rc), pushf(31), pushf(31);
-  }
-  void vtxt(u32 fx, u32 fy, u32 rc, u32 fu, u32 fv) {
-    pushf(fx), pushf(fy), pushf(31), pushf(30), push(rc), pushf(fu), pushf(fv);
-  }
-  void mode(u32 m) {
-    pushk(Spike::kSetMode << 24 | 1);
-    pushk(m);
-  }
-  // fd = float(rs); uses r0, f0 and the scratch slot.
-  void i2f(u32 fd, u32 rs) {
-    a_ << xoris(0, rs, 0x8000) << stw(0, kScratch + 4, rRam) << lis(0, 0x4330) << stw(0, kScratch, rRam);
-    a_ << lfd(fd, kScratch, rRam) << lfd(0, int16_t(magic_), rPool) << fsub(fd, fd, 0) << frsp(fd, fd);
-  }
-  // rd = int(fs) (truncated); uses f0 and the scratch slot.
-  void f2i(u32 rd, u32 fs) { a_ << fctiwz(0, fs) << stfd(0, kScratch, rRam) << lwz(rd, kScratch + 4, rRam); }
-  // rd = rc with RGB scaled by fI (0..1, saturating); alpha kept.
-  void shade(u32 rc, u32 fI, u32 rd, u32 rk, u32 t1, u32 t2) {
-    const std::string hi = L("shade_hi"), lo = L("shade_lo");
-    lf(0, 256.0f);
-    a_ << fmuls(0, fI, 0);
-    f2i(rk, 0);
-    a_ << cmpwi(0, rk, 256);
-    a_.ble(hi);
-    a_ << li(rk, 256);
-    a_.label(hi);
-    a_ << cmpwi(0, rk, 0);
-    a_.bge(lo);
-    a_ << li(rk, 0);
-    a_.label(lo);
-    a_ << rlwinm(t1, rc, 16, 24, 31) << mullw(t1, t1, rk) << rlwinm(t1, t1, 8, 8, 15);
-    a_ << rlwinm(t2, rc, 24, 24, 31) << mullw(t2, t2, rk) << rlwinm(t2, t2, 0, 16, 23) << or_(t1, t1, t2);
-    a_ << clrlwi(t2, rc, 24) << mullw(t2, t2, rk) << srwi(t2, t2, 8) << or_(t1, t1, t2);
-    a_ << rlwinm(t2, rc, 0, 0, 7) << or_(rd, t1, t2);
-  }
-  void prologue() { a_ << mflr(0) << stwu(1, -16, 1) << stw(0, 8, 1); }
-  void epilogue() { a_ << lwz(0, 8, 1) << addi(1, 1, 16) << mtlr(0) << blr(); }
-  // Calls `routine` with f1..f4 = constants.
-  void rect(float x0, float y0, float x1, float y1, u32 top, u32 bottom) {
-    lf(1, x0), lf(2, y0), lf(3, x1), lf(4, y1);
-    load(3, top), load(4, bottom);
-    a_.bl("quad");
-  }
-  void text(const std::string& str, float x, float y, float size, u32 argb, bool centered) {
-    a_.la(3, str);
-    load(4, argb);
-    lf(1, x), lf(2, y), lf(3, size);
-    a_.bl(centered ? "textc" : "text");
-  }
-  // Text whose colour is `argb` scaled by the float at `off(base)`.
-  void text_faded(const std::string& str, float x, float y, float size, u32 argb, bool centered, u32 base, int16_t off) {
-    load(3, argb);
-    a_ << lfs(1, off, base);
-    a_.bl("shade");
-    a_ << mr(4, 3);
-    a_.la(3, str);
-    lf(1, x), lf(2, y), lf(3, size);
-    a_.bl(centered ? "textc" : "text");
-  }
-  void str(const std::string& label, const std::string& s) {
-    a_.label(label);
-    std::vector<u8> b(s.begin(), s.end());
-    b.push_back(0);
-    while (b.size() % 4) b.push_back(0);
-    for (size_t i = 0; i < b.size(); i += 4) a_.word(u32(b[i]) << 24 | u32(b[i + 1]) << 16 | u32(b[i + 2]) << 8 | b[i + 3]);
-  }
-  // Pressed-button test on r14: branches to `skip` when none of `mask` is pressed.
-  void unless_pressed(u32 mask, const std::string& skip) {
-    a_ << andi_(0, 14, mask);
-    a_.beq(skip);
-  }
-
-  void globals();
-  void video_init();
-  void vectors();
-  void reset();
-  void routines();
-  void intro();
-  void dashboard();
-  void loading();
-  void loader();
-  void data();
-
-  Asm a_{map::kRomBase};
-  Pool pool_;
-  int uid_ = 0;
-  u32 magic_ = 0, sin_ = 0, circle_ = 0, uv_ = 0;
-  rom::SoundBank bank_ = rom::sound_bank();
-};
+namespace romgen {
 
 // ------------------------------------------------------------------ setup
 
@@ -250,10 +57,10 @@ void RomBuilder::vectors() {
   a_.word(0x4C494F4E);   // "LION"
   a_.word(0x0000'0A02);  // board revision A2
   a_.word(0x0001'0000);  // ROM version 1.0
-  while (a_.here() < map::kRomBase + 0x100) a_.word(0);
+  while (a_.here() < map::kRomVectors + 0x100) a_.word(0);
   a_.b("start");  // 0x100: reset
   for (u32 v = 0x200; v < 0x1000; v += 0x100) {
-    while (a_.here() < map::kRomBase + v) a_.word(0);
+    while (a_.here() < map::kRomVectors + v) a_.word(0);
     if (v == 0x500) {
       // External interrupt: acknowledge everything (the ROM only uses them to wake up).
       a_ << mtspr(272, 3) << mtspr(273, 4) << lis(3, map::kPic >> 16) << lwz(4, 0, 3) << stw(4, 0, 3);
@@ -265,7 +72,7 @@ void RomBuilder::vectors() {
       a_.b("fatal");  // unexpected exception
     }
   }
-  while (a_.here() < map::kRomBase + 0x1000) a_.word(0);
+  while (a_.here() < map::kRomVectors + 0x1000) a_.word(0);
 }
 
 void RomBuilder::reset() {
@@ -286,7 +93,7 @@ void RomBuilder::reset() {
   a_ << li(6, 1) << stw(6, 0, 4);
 
   // Dashboard RAM.
-  a_ << li(0, 0) << li(3, 0x100 / 4) << mtctr(3) << mr(3, rRam);
+  a_ << li(0, 0) << li(3, kRamClear / 4) << mtctr(3) << mr(3, rRam);
   a_.label("ram_clear");
   a_ << stw(0, 0, 3) << addi(3, 3, 4);
   a_.bdnz("ram_clear");
@@ -300,6 +107,13 @@ void RomBuilder::reset() {
   a_.label("font_copy");
   a_ << lwz(6, 0, 3) << stw(6, 0, 4) << addi(3, 3, 4) << addi(4, 4, 4);
   a_.bdnz("font_copy");
+  a_.la(3, "jaguar");
+  a_.li32(4, kJaguarTex);
+  a_.li32(5, (256 * 64 * 2) / 4);
+  a_ << mtctr(5);
+  a_.label("jaguar_copy");
+  a_ << lwz(6, 0, 3) << stw(6, 0, 4) << addi(3, 3, 4) << addi(4, 4, 4);
+  a_.bdnz("jaguar_copy");
 
   // Development units go straight to the disc (or the dashboard).
   a_ << lwz(3, 8, rPic) << andi_(3, 3, Pic::kStrapFastBoot);
@@ -524,543 +338,323 @@ void RomBuilder::routines() {
   a_.label("fade_none");
   a_ << blr();
 
-  // seq_step: plays the sequencer events due this frame.
+  // seq_step: plays the sequencer events due this frame. A kSeqLoop event
+  // restarts the sequence; at the end of the jingle the sound theme takes over.
   a_.label("seq_step");
-  a_ << lwz(3, kSeqPtr, rRam) << cmpwi(0, 3, 0);
+  prologue();
+  a_.bl("stream_update");  // streamed themes are fed from here too
+  ram_ld(3, kSeqPtr);
+  a_ << cmpwi(0, 3, 0);
   a_.beq("seq_done");
-  a_ << lwz(4, kSeqT, rRam);
+  ram_ld(4, kSeqT);
   a_.label("seq_loop");
   a_ << lwz(5, 0, 3) << cmplw(0, 5, 4);
   a_.bgt("seq_out");
-  a_ << lwz(6, 4, 3) << lwz(7, 8, 3) << stwx(7, rTyke, 6) << addi(3, 3, 12);
+  a_ << lwz(6, 4, 3) << li(0, -2) << cmpw(0, 6, 0);
+  a_.beq("seq_restart");
+  a_ << lwz(7, 8, 3) << stwx(7, rTyke, 6) << addi(3, 3, 12);
+  a_.b("seq_loop");
+  a_.label("seq_restart");
+  ram_ld(3, kSeqLoop);
+  a_ << li(4, 0);
   a_.b("seq_loop");
   a_.label("seq_out");
-  a_ << stw(3, kSeqPtr, rRam) << addi(4, 4, 1) << stw(4, kSeqT, rRam);
+  ram_st(3, kSeqPtr);
+  a_ << addi(4, 4, 1);
+  ram_st(4, kSeqT);
+  a_ << cmpwi(0, 5, -1);  // reached the end marker?
+  a_.bne("seq_done");
+  ram_set(kSeqPtr, 0);
+  ram_ld(0, kSeqJingle);
+  a_ << cmpwi(0, 0, 0);
+  a_.beq("seq_done");
+  ram_set(kSeqJingle, 0);
+  ram_ld(0, kMusicState);
+  a_ << cmpwi(0, 0, kMusicStopped);
+  a_.bne("seq_done");
+  a_.bl("theme_start");
   a_.label("seq_done");
-  a_ << blr();
+  epilogue();
 
-  // jingle: (re)starts the start-up jingle.
+  // jingle: (re)starts the start-up jingle; the theme resumes when it ends.
   a_.label("jingle");
   a_.la(3, "jingle_events");
-  a_ << stw(3, kSeqPtr, rRam) << li(0, 0) << stw(0, kSeqT, rRam) << blr();
+  ram_st(3, kSeqPtr);
+  ram_st(3, kSeqLoop);
+  ram_set(kSeqT, 0);
+  ram_set(kSeqJingle, 1);
+  a_ << blr();
+
+  // theme_start: plays the selected sound theme from its beginning: its sequence,
+  // and its music stream if it has one ({events, stream} per theme).
+  a_.label("theme_start");
+  ram_ld(3, kTheme);
+  a_.la(4, "theme_table");
+  a_ << slwi(3, 3, 3) << add(4, 4, 3) << lwz(3, 0, 4);
+  ram_st(3, kSeqPtr);
+  ram_st(3, kSeqLoop);
+  ram_set(kSeqT, 0);
+  ram_set(kSeqJingle, 0);
+  a_ << lwz(3, 4, 4) << cmpwi(0, 3, 0);
+  a_.bne("stream_start");  // tail calls
+  a_.b("stream_stop");
 
   // silence: stops the sequencer and every voice.
   a_.label("silence");
-  a_ << li(3, 0) << stw(3, kSeqPtr, rRam) << addi(4, rTyke, 0x100 + 20) << li(5, Tyke::kChannels) << mtctr(5);
+  a_ << li(3, 0) << stw(3, kSeqPtr, rRam) << stw(3, int16_t(kTsActive), rRam) << addi(4, rTyke, 0x100 + 20)
+     << li(5, Tyke::kChannels) << mtctr(5);
   a_.label("silence_loop");
   a_ << stw(3, 0, 4) << addi(4, 4, 32);
   a_.bdnz("silence_loop");
   a_ << blr();
 
-  // sfx(r3 = {start, length, pitch, volume}): voices 21-23 in rotation; the next
-  // one is keyed off so it can retrigger.
+  // sfx(r3 = {start, length, pitch, volume}): voices 21-23 in rotation.
   a_.label("sfx");
   auto voice_base = [&](u32 rch, u32 rd) {
     a_ << slwi(rd, rch, 5) << addi(rd, rd, 0x100) << add(rd, rd, rTyke);
   };
-  auto rotate = [&](u32 r) {
-    const std::string ok = L("sfx_rot");
-    a_ << addi(r, r, 1) << cmpwi(0, r, 24);
-    a_.blt(ok);
-    a_ << li(r, 21);
-    a_.label(ok);
-  };
-  a_ << lwz(4, kSfxCh, rRam);
-  rotate(4);
+  a_ << lwz(4, kSfxCh, rRam) << addi(4, 4, 1) << cmpwi(0, 4, 24);
+  a_.blt("sfx_rot");
+  a_ << li(4, 21);
+  a_.label("sfx_rot");
   a_ << stw(4, kSfxCh, rRam);
   voice_base(4, 5);
   a_ << lwz(6, 0, 3) << stw(6, 0, 5) << lwz(6, 4, 3) << stw(6, 4, 5) << stw(6, 8, 5);
-  a_ << lwz(6, 8, 3) << stw(6, 12, 5) << lwz(6, 12, 3) << stw(6, 16, 5) << li(0, 1) << stw(0, 20, 5);
-  rotate(4);
-  voice_base(4, 5);
-  a_ << li(0, 0) << stw(0, 20, 5) << blr();
+  a_ << lwz(6, 8, 3) << stw(6, 12, 5) << lwz(6, 12, 3) << stw(6, 16, 5) << li(0, 1) << stw(0, 20, 5) << blr();
 
-  // cd_async: tracks the drive and reads the volume label without blocking.
+  // cd_async: tracks the drive without blocking. On a new disc it reads the
+  // volume label, then scans the root directory for BOOT.LION and .WAV tracks.
   a_.label("cd_async");
   a_ << lwz(3, 0, rCd) << andi_(4, 3, Cdrom::kPresent);
   a_.bne("cda_present");
-  a_ << li(0, kNoDisc) << stw(0, kDiscState, rRam) << blr();
+  a_ << li(0, 0);
+  for (u32 off : {kDiscState, kHasGame, kTrackCount, kBootFailed}) ram_st(0, off);
+  ram_ld(4, kCdOwner);
+  a_ << cmpwi(0, 4, kOwnerDash);
+  a_.bne("cda_done");
+  ram_st(0, kCdOwner);
+  a_.b("cda_done");
   a_.label("cda_present");
-  a_ << lwz(5, kDiscState, rRam) << cmpwi(0, 5, kNoDisc);
-  a_.bne("cda_reading");
+  ram_ld(5, kDiscState);
+  a_ << cmpwi(0, 5, kNoDisc);
+  a_.bne("cda_not_new");
+  ram_ld(0, kCdOwner);
+  a_ << cmpwi(0, 0, kOwnerNone);
+  a_.bne("cda_done");  // the drive is busy
   a_ << li(0, 16) << stw(0, 8, rCd) << li(0, 1) << stw(0, 12, rCd);
   a_.li32(0, kSectorBuf);
   a_ << stw(0, 16, rCd) << li(0, Cdrom::kRead) << stw(0, 4, rCd);
-  a_ << li(0, kReading) << stw(0, kDiscState, rRam) << blr();
-  a_.label("cda_reading");
+  ram_set(kCdOwner, kOwnerDash);
+  ram_set(kDiscState, kReading);
+  a_.b("cda_done");
+  a_.label("cda_not_new");
   a_ << cmpwi(0, 5, kReading);
+  a_.beq("cda_pvd");
+  a_ << cmpwi(0, 5, kReadingDir);
   a_.bne("cda_done");
+  // Root directory arrived: scan it.
   a_ << andi_(4, 3, Cdrom::kDone);
   a_.beq("cda_done");
-  a_ << li(0, Cdrom::kAck) << stw(0, 4, rCd) << andi_(4, 3, Cdrom::kError);
+  a_ << li(0, Cdrom::kAck) << stw(0, 4, rCd);
+  ram_set(kCdOwner, kOwnerNone);
+  a_ << andi_(4, 3, Cdrom::kError);
+  a_.bne("cda_bad");
+  a_ << li(0, 0);
+  ram_st(0, kHasGame);
+  ram_st(0, kTrackCount);
+  a_.li32(6, kDirBuf);
+  ram_ld(7, kDirSize);
+  a_ << add(7, 6, 7);
+  a_.label("cda_scan");
+  a_ << cmplw(0, 6, 7);
+  a_.bge("cda_scanned");
+  a_ << lbz(8, 0, 6) << cmpwi(0, 8, 0);
+  a_.bne("cda_record");
+  a_.li32(9, kDirBuf);  // records never cross sectors
+  a_ << subf(10, 9, 6) << addi(10, 10, 2048) << rlwinm(10, 10, 0, 0, 20) << add(6, 9, 10);
+  a_.b("cda_scan");
+  a_.label("cda_record");
+  a_ << lbz(9, 32, 6) << addi(10, 6, 33);  // name length, name
+  // BOOT.LION;1?
+  a_ << cmpwi(0, 9, 11);
+  a_.bne("cda_not_boot");
+  a_.la(11, "boot_name");
+  a_ << li(12, 0);
+  a_.label("cda_cmp_boot");
+  a_ << lbzx(4, 10, 12) << lbzx(5, 11, 12) << cmpw(0, 4, 5);
+  a_.bne("cda_not_boot");
+  a_ << addi(12, 12, 1) << cmpwi(0, 12, 11);
+  a_.blt("cda_cmp_boot");
+  ram_set(kHasGame, 1);
+  a_.label("cda_not_boot");
+  // NAME.WAV or NAME.WAV;1?
+  a_ << add(11, 10, 9);  // end of the name
+  a_ << cmpwi(0, 9, 6);
+  a_.blt("cda_next");
+  a_ << lbz(4, -2, 11) << cmpwi(0, 4, ';');
+  a_.bne("cda_no_version");
+  a_ << addi(11, 11, -2);
+  a_.label("cda_no_version");
+  const char ext[4] = {'.', 'W', 'A', 'V'};
+  for (int k = 0; k < 4; ++k) {
+    a_ << lbz(4, int16_t(k - 4), 11) << cmpwi(0, 4, ext[k]);
+    a_.bne("cda_next");
+  }
+  ram_ld(12, kTrackCount);
+  a_ << cmpwi(0, 12, int16_t(kMaxTracks));
+  a_.bge("cda_next");
+  a_ << mulli(4, 12, int16_t(kTrackSize)) << add(4, 4, rRam) << addi(4, 4, int16_t(kTracks));
+  a_ << li(5, 2) << lwbrx(5, 6, 5) << stw(5, 0, 4);   // LBA
+  a_ << li(5, 10) << lwbrx(5, 6, 5) << stw(5, 4, 4);  // size
+  // Name without ".WAV", at most 15 characters.
+  a_ << addi(11, 11, -4) << subf(5, 10, 11) << cmpwi(0, 5, 15);
+  a_.ble("cda_len_ok");
+  a_ << li(5, 15);
+  a_.label("cda_len_ok");
+  a_ << addi(4, 4, 8) << cmpwi(0, 5, 0);
+  a_.beq("cda_name_done");
+  a_ << mtctr(5);
+  a_.label("cda_name");
+  a_ << lbz(0, 0, 10) << stb(0, 0, 4) << addi(10, 10, 1) << addi(4, 4, 1);
+  a_.bdnz("cda_name");
+  a_.label("cda_name_done");
+  a_ << li(0, 0) << stb(0, 0, 4) << addi(12, 12, 1);
+  ram_st(12, kTrackCount);
+  a_.label("cda_next");
+  a_ << add(6, 6, 8);
+  a_.b("cda_scan");
+  a_.label("cda_scanned");
+  ram_set(kDiscState, kReady);
+  a_.b("cda_done");
+  // Volume descriptor arrived: keep the label and fetch the root directory.
+  a_.label("cda_pvd");
+  a_ << andi_(4, 3, Cdrom::kDone);
+  a_.beq("cda_done");
+  a_ << li(0, Cdrom::kAck) << stw(0, 4, rCd);
+  ram_set(kCdOwner, kOwnerNone);
+  a_ << andi_(4, 3, Cdrom::kError);
   a_.bne("cda_bad");
   a_.li32(6, kSectorBuf);
   a_ << lbz(7, 0, 6) << cmpwi(0, 7, 1);
   a_.bne("cda_bad");
+  a_ << li(4, 158) << lwbrx(8, 6, 4) << li(4, 166) << lwbrx(9, 6, 4);  // root LBA, size
   a_ << addi(6, 6, 40) << addi(7, rRam, kLabel) << li(0, 32) << mtctr(0);
   a_.label("cda_copy");
   a_ << lbz(0, 0, 6) << stb(0, 0, 7) << addi(6, 6, 1) << addi(7, 7, 1);
   a_.bdnz("cda_copy");
-  a_ << li(0, 0) << stb(0, 0, 7) << addi(8, rRam, kLabel);
+  a_ << li(0, 0) << stb(0, 0, 7) << addi(10, rRam, kLabel);
   a_.label("cda_trim");
   a_ << addi(7, 7, -1) << lbz(0, 0, 7) << cmpwi(0, 0, 32);
   a_.bne("cda_trimmed");
-  a_ << li(0, 0) << stb(0, 0, 7) << cmplw(0, 7, 8);
+  a_ << li(0, 0) << stb(0, 0, 7) << cmplw(0, 7, 10);
   a_.bgt("cda_trim");
   a_.label("cda_trimmed");
-  a_ << li(0, kReady) << stw(0, kDiscState, rRam) << blr();
+  a_.li32(0, kDirMax);
+  a_ << cmplw(0, 9, 0);
+  a_.ble("cda_dir_ok");
+  a_ << mr(9, 0);
+  a_.label("cda_dir_ok");
+  ram_st(9, kDirSize);
+  a_ << addi(9, 9, 2047) << srwi(9, 9, 11);
+  a_ << stw(8, 8, rCd) << stw(9, 12, rCd);
+  a_.li32(0, kDirBuf);
+  a_ << stw(0, 16, rCd) << li(0, Cdrom::kRead) << stw(0, 4, rCd);
+  ram_set(kCdOwner, kOwnerDash);
+  ram_set(kDiscState, kReadingDir);
+  a_.b("cda_done");
   a_.label("cda_bad");
-  a_ << li(0, kUnplayable) << stw(0, kDiscState, rRam);
+  ram_set(kDiscState, kUnplayable);
   a_.label("cda_done");
   a_ << blr();
 
-  // read_pad: r14 = buttons pressed since the last frame.
+  // read_pad: r14 = buttons pressed since the last frame; held directions repeat.
   a_.label("read_pad");
-  a_ << lwz(3, 0, rPad) << lwz(4, kPadPrev, rRam) << stw(3, kPadPrev, rRam) << andc(14, 3, 4) << blr();
+  a_ << lwz(3, 0, rPad) << lwz(4, kPadPrev, rRam) << stw(3, kPadPrev, rRam) << andc(14, 3, 4);
+  constexpr u32 kDirs = Pads::kUp | Pads::kDown | Pads::kLeft | Pads::kRight;
+  a_ << andi_(5, 3, kDirs) << andi_(6, 4, kDirs) << cmpw(0, 5, 6) << li(7, 0);
+  a_.bne("pad_hold_reset");
+  a_ << cmpwi(0, 5, 0);
+  a_.beq("pad_hold_reset");
+  ram_ld(7, kHold);
+  a_ << addi(7, 7, 1) << cmpwi(0, 7, 20);
+  a_.blt("pad_hold_reset");
+  a_ << andi_(0, 7, 3);
+  a_.bne("pad_hold_reset");
+  a_ << or_(14, 14, 5);  // auto-repeat every 4 frames after 1/3 s
+  a_.label("pad_hold_reset");
+  ram_st(7, kHold);
+  a_ << blr();
+
+  // poly4t(r3 = 4 x {x, y, u, v}, r4 = ARGB): textured quad.
+  a_.label("poly4t");
+  for (int k = 0; k < 4; ++k)
+    for (int c = 0; c < 4; ++c) a_ << lfs(u32(1 + 4 * k + c), int16_t(16 * k + 4 * c), 3);
+  tri_header();
+  vtxt(1, 2, 4, 3, 4), vtxt(5, 6, 4, 7, 8), vtxt(9, 10, 4, 11, 12);
+  tri_header();
+  vtxt(1, 2, 4, 3, 4), vtxt(9, 10, 4, 11, 12), vtxt(13, 14, 4, 15, 16);
+  a_ << blr();
+
+  // poly4c(r3 = 4 x {x, y, ARGB}): Gouraud quad.
+  a_.label("poly4c");
+  for (int k = 0; k < 4; ++k) a_ << lfs(u32(1 + 2 * k), int16_t(12 * k), 3) << lfs(u32(2 + 2 * k), int16_t(12 * k + 4), 3)
+                                 << lwz(u32(5 + k), int16_t(12 * k + 8), 3);
+  tri_header();
+  vtx(1, 2, 5), vtx(3, 4, 6), vtx(5, 6, 7);
+  tri_header();
+  vtx(1, 2, 5), vtx(5, 6, 7), vtx(7, 8, 8);
+  a_ << blr();
+
+  // strcpy(r3 = source, r4 = destination) -> r4 at the copied NUL.
+  a_.label("strcpy");
+  a_.label("strcpy_loop");
+  a_ << lbz(0, 0, 3) << stb(0, 0, 4) << cmpwi(0, 0, 0);
+  a_.beq("strcpy_done");
+  a_ << addi(3, 3, 1) << addi(4, 4, 1);
+  a_.b("strcpy_loop");
+  a_.label("strcpy_done");
+  a_ << blr();
+
+  // fmt2(r3 = 0..99, r4 = destination): two digits and a NUL; r4 advances by 2.
+  a_.label("fmt2");
+  a_ << li(5, 10) << divwu(6, 3, 5) << mullw(7, 6, 5) << subf(7, 7, 3);
+  a_ << addi(6, 6, '0') << addi(7, 7, '0') << stb(6, 0, 4) << stb(7, 1, 4) << li(0, 0) << stb(0, 2, 4) << addi(4, 4, 2)
+     << blr();
+
+  // fmt_time(r3 = seconds, r4 = destination): "MM:SS"; r4 advances by 5.
+  a_.label("fmt_time");
+  prologue();
+  a_ << li(5, 60) << divwu(8, 3, 5) << mullw(9, 8, 5) << subf(9, 9, 3) << cmpwi(0, 8, 99);
+  a_.ble("fmt_time_ok");
+  a_ << li(8, 99);
+  a_.label("fmt_time_ok");
+  a_ << mr(3, 8);
+  a_.bl("fmt2");
+  a_ << li(0, ':') << stb(0, 0, 4) << addi(4, 4, 1) << mr(3, 9);
+  a_.bl("fmt2");
+  epilogue();
+
+  // fmt_pct(r3 = 0..256, r4 = destination): "NNN%" right-aligned.
+  a_.label("fmt_pct");
+  a_ << mulli(3, 3, 100) << srwi(3, 3, 8) << li(5, 10);
+  for (int d = 2; d >= 0; --d) {
+    a_ << divwu(6, 3, 5) << mullw(7, 6, 5) << subf(7, 7, 3) << addi(7, 7, '0') << stb(7, int16_t(d), 4) << mr(3, 6);
+  }
+  a_ << lbz(0, 0, 4) << cmpwi(0, 0, '0');  // blank leading zeros
+  a_.bne("pct_done");
+  a_ << li(0, ' ') << stb(0, 0, 4) << lbz(0, 1, 4) << cmpwi(0, 0, '0');
+  a_.bne("pct_done");
+  a_ << li(0, ' ') << stb(0, 1, 4);
+  a_.label("pct_done");
+  a_ << li(0, '%') << stb(0, 3, 4) << li(0, 0) << stb(0, 4, 4) << blr();
 }
 
 // ------------------------------------------------------------------ intro
 
-void RomBuilder::intro() {
-  using rom::kIntroColumns;
-  a_.label("intro");
-  a_ << li(0, kSceneIntro) << stw(0, kScene, rRam);
-  a_.bl("jingle");
-  a_ << li(17, 0);  // frame
-  a_.la(18, "intro_tab");
-  a_.label("intro_loop");
-  a_.bl("read_pad");
-  unless_pressed(Pads::kStart | Pads::kA, "intro_noskip");
-  a_ << cmpwi(0, 17, 206);
-  a_.bge("intro_noskip");
-  a_ << li(17, 206);
-  a_.label("intro_noskip");
-  a_.bl("cd_async");
-  a_ << slwi(0, 17, 6) << add(19, 18, 0);  // row (16 floats)
-  static_assert(kIntroColumns == 16);
-
-  a_ << li(3, 3) << li(4, 0);
-  a_.bl("begin_frame");
-  // Glow behind the mark: a wide red halo and a hot core.
-  mode(kMAdd);
-  for (auto [rx, ry, color] : {std::tuple{330.0f, 240.0f, 0xFFB01414u}, std::tuple{130.0f, 120.0f, 0xFFFF6A2Au}}) {
-    load(3, color);
-    a_ << lfs(1, 28, 19);
-    a_.bl("shade");
-    a_ << lis(4, 0xFF00);
-    a_ << lfs(5, 28, 19);
-    lf(6, rx);
-    a_ << fmuls(3, 5, 6);
-    lf(6, ry);
-    a_ << fmuls(4, 5, 6);
-    lf(1, 320), lf(2, 190);
-    a_.bl("fan");
-  }
-  mode(kM3D);
-  a_.la(3, "mesh_emblem");
-  a_ << mr(4, 19) << lfs(1, 24, 19);
-  a_.bl("mesh");
-  mode(kMText);
-  text_faded("s_atari", 190, 330, 36, 0xFFF4F0EA, false, 19, 32);
-  text_faded("s_lion", 352, 330, 36, 0xFFE81E1E, false, 19, 36);
-  text_faded("s_tagline", 320, 384, 12, 0xFFB4A8A0, true, 19, 40);
-  // Flash on the hit.
-  a_ << lfs(1, 44, 19) << fcmpu(0, 1, 31);
-  a_.ble("intro_noflash");
-  mode(kMAdd);
-  a_.li32(3, 0xFFFFC898);
-  a_.bl("shade");
-  a_ << mr(4, 3);
-  lf(1, 0), lf(2, 0), lf(3, 640), lf(4, 480);
-  a_.bl("quad");
-  a_.label("intro_noflash");
-  a_ << lfs(1, 48, 19);
-  a_.bl("fade");
-  a_.bl("end_frame");
-  a_.bl("seq_step");
-  a_ << addi(17, 17, 1) << cmpwi(0, 17, int16_t(rom::kIntroFrames));
-  a_.blt("intro_loop");
-
-  // A disc in the drive boots straight away, as on the retail units.
-  a_ << lwz(3, 0, rCd) << andi_(3, 3, Cdrom::kPresent);
-  a_.bne("loading");
-  a_.b("dash_enter");
-}
-
-// ------------------------------------------------------------------ dashboard
-
-void RomBuilder::dashboard() {
-  constexpr float kCardX[3] = {160, 320, 480};
-  const char* meshes[3] = {"mesh_disc", "mesh_audio", "mesh_chip"};
-  const char* labels[3] = {"s_disc", "s_audio", "s_system"};
-
-  a_.label("dash_enter");
-  a_ << li(0, kSceneDashboard) << stw(0, kScene, rRam);
-  a_ << stfs(30, kFade, rRam) << li(0, 0) << stw(0, kSelection, rRam) << stw(0, kSubmenu, rRam)
-     << stw(0, kLaunch, rRam);
-  lf(1, 0.7f);
-  lf(2, 0.4f);
-  for (int i = 0; i < 3; ++i) a_ << stfs(1, int16_t(kCardScale + 4 * i), rRam) << stfs(2, int16_t(kCardBright + 4 * i), rRam);
-  a_.bl("read_pad");  // swallow the button that got us here
-
-  a_.label("dash_loop");
-  a_.bl("read_pad");
-  a_.bl("cd_async");
-  a_ << lwz(20, kSelection, rRam) << lwz(19, kSubmenu, rRam);
-  a_ << lwz(0, kLaunch, rRam) << cmpwi(0, 0, 0);
-  a_.bne("dash_input_done");
-  a_ << cmpwi(0, 19, kSubNone);
-  a_.bne("dash_in_sub");
-  // Main row: left/right moves, A or Start activates.
-  unless_pressed(Pads::kLeft, "dash_no_left");
-  a_ << cmpwi(0, 20, 0);
-  a_.beq("dash_no_left");
-  a_ << addi(20, 20, -1);
-  a_.la(3, "sfx_tick");
-  a_.bl("sfx");
-  a_.label("dash_no_left");
-  unless_pressed(Pads::kRight, "dash_no_right");
-  a_ << cmpwi(0, 20, 2);
-  a_.beq("dash_no_right");
-  a_ << addi(20, 20, 1);
-  a_.la(3, "sfx_tick");
-  a_.bl("sfx");
-  a_.label("dash_no_right");
-  unless_pressed(Pads::kA | Pads::kStart, "dash_input_done");
-  a_ << cmpwi(0, 20, kItemDisc);
-  a_.bne("dash_not_disc");
-  a_ << lwz(0, kDiscState, rRam) << cmpwi(0, 0, kReady);
-  a_.bne("dash_disc_unavailable");
-  a_ << li(0, 1) << stw(0, kLaunch, rRam);
-  a_.la(3, "sfx_ok");
-  a_.bl("sfx");
-  a_.b("dash_input_done");
-  a_.label("dash_disc_unavailable");
-  a_.la(3, "sfx_back");
-  a_.bl("sfx");
-  a_.b("dash_input_done");
-  a_.label("dash_not_disc");
-  a_.la(3, "sfx_ok");
-  a_.bl("sfx");
-  a_ << cmpwi(0, 20, kItemAudio);
-  a_.bne("dash_open_system");
-  a_ << li(19, kSubAudio);
-  a_.bl("jingle");
-  a_.b("dash_input_done");
-  a_.label("dash_open_system");
-  a_ << li(19, kSubSystem);
-  a_.b("dash_input_done");
-  // Panels: B closes, A replays the jingle in the sound test.
-  a_.label("dash_in_sub");
-  unless_pressed(Pads::kB, "dash_sub_no_b");
-  a_ << li(19, kSubNone);
-  a_.la(3, "sfx_back");
-  a_.bl("sfx");
-  a_.b("dash_input_done");
-  a_.label("dash_sub_no_b");
-  a_ << cmpwi(0, 19, kSubAudio);
-  a_.bne("dash_input_done");
-  unless_pressed(Pads::kA, "dash_input_done");
-  a_.bl("jingle");
-  a_.label("dash_input_done");
-  a_ << stw(20, kSelection, rRam) << stw(19, kSubmenu, rRam);
-
-  // ---- animation
-  // Fade in, or out while launching.
-  a_ << lfs(1, kFade, rRam) << lwz(0, kLaunch, rRam) << cmpwi(0, 0, 0);
-  a_.bne("dash_fading_out");
-  lf(2, 0.05f);
-  a_ << fsubs(1, 1, 2) << fsel(1, 1, 1, 31);
-  a_.b("dash_faded");
-  a_.label("dash_fading_out");
-  lf(2, 0.06f);
-  a_ << fadds(1, 1, 2);
-  a_.label("dash_faded");
-  a_ << stfs(1, kFade, rRam);
-  // Angle wrap helper: x += step, minus 256 past a full turn.
-  auto spin = [&](u32 off, float step) {
-    const std::string ok = L("spin");
-    a_ << lfs(1, int16_t(off), rRam);
-    lf(2, step);
-    a_ << fadds(1, 1, 2);
-    lf(2, 256.0f);
-    a_ << fcmpu(0, 1, 2);
-    a_.blt(ok);
-    a_ << fsubs(1, 1, 2);
-    a_.label(ok);
-    a_ << stfs(1, int16_t(off), rRam);
-  };
-  // Grid scroll.
-  {
-    a_ << lfs(1, kScroll, rRam);
-    lf(2, 0.04f);
-    a_ << fadds(1, 1, 2);
-    lf(2, rom::kGridStep);
-    a_ << fcmpu(0, 1, 2);
-    a_.blt("dash_scroll_ok");
-    a_ << fsubs(1, 1, 2);
-    a_.label("dash_scroll_ok");
-    a_ << stfs(1, kScroll, rRam);
-  }
-  spin(kEmblemYaw, 0.6f);
-  // Cards ease towards their targets; the selected icon spins.
-  for (int i = 0; i < 3; ++i) {
-    const std::string other = L("card_other"), set = L("card_set"), go = L("card_go");
-    a_ << cmpwi(0, 20, i);
-    a_.bne(other);
-    lf(2, 1.0f), lf(3, 1.3f);
-    a_.b(set);
-    a_.label(other);
-    lf(2, 0.72f), lf(3, 0.45f);
-    a_.label(set);
-    a_ << cmpwi(0, 19, kSubNone);
-    a_.beq(go);
-    lf(3, 0.25f);
-    a_.label(go);
-    lf(5, 0.18f);
-    for (auto [off, target] : {std::pair{kCardScale + 4 * i, 2u}, std::pair{kCardBright + 4 * i, 3u}}) {
-      a_ << lfs(1, int16_t(off), rRam) << fsubs(4, target, 1) << fmadds(1, 4, 5, 1) << stfs(1, int16_t(off), rRam);
-    }
-    // The selected icon sways to show itself off; the others settle facing front.
-    const std::string still = L("icon_still");
-    a_ << fmr(6, 31) << cmpwi(0, 20, i);
-    a_.bne(still);
-    a_ << slwi(3, rFrame, 1) << clrlwi(3, 3, 24) << slwi(3, 3, 2) << add(3, 3, rPool) << lfs(6, int16_t(sin_), 3);
-    lf(7, 30.0f);
-    a_ << fmuls(6, 6, 7);
-    a_.label(still);
-    a_ << lfs(1, int16_t(kIconYaw + 4 * i), rRam) << fsubs(4, 6, 1);
-    lf(5, 0.12f);
-    a_ << fmadds(1, 4, 5, 1) << stfs(1, int16_t(kIconYaw + 4 * i), rRam);
-  }
-
-  // ---- render
-  // Black clear, then only the bands that are not black: fill rate is precious.
-  a_ << li(3, 3) << li(4, 0);
-  a_.bl("begin_frame");
-  mode(kM2D);
-  rect(0, 84, 640, 240, 0xFF000000, 0xFF3E0B0D);   // sky glowing towards the horizon
-  rect(0, 240, 640, 330, 0xFF140305, 0xFF000000);  // floor
-  // Floor grid rolling towards the viewer.
-  mode(kMGrid);
-  a_ << stfs(31, kXform, rRam) << stfs(31, kXform + 4, rRam) << stfs(30, kXform + 8, rRam)
-     << stfs(31, kXform + 12, rRam);
-  lf(1, -1.3f);
-  a_ << stfs(1, kXform + 16, rRam) << lfs(1, kScroll, rRam) << stfs(1, kXform + 20, rRam);
-  a_.la(3, "mesh_grid");
-  a_ << addi(4, rRam, kXform) << fmr(1, 30);
-  a_.bl("mesh");
-  mode(kMBlend);
-  rect(0, 240, 640, 300, 0xD03E0B0D, 0x003E0B0D);  // haze on the horizon
-
-  // Header: the Lion mark, the name and a rule.
-  mode(kM3D);
-  {
-    a_ << lfs(1, kEmblemYaw, rRam) << stfs(1, kXform, rRam) << stfs(31, kXform + 4, rRam);
-    const float t[4] = {0.42f, -4.85f, 3.45f, -7.5f};
-    for (int i = 0; i < 4; ++i) {
-      lf(1, t[i]);
-      a_ << stfs(1, int16_t(kXform + 8 + 4 * i), rRam);
-    }
-    a_.la(3, "mesh_emblem_small");
-    a_ << addi(4, rRam, kXform) << fmr(1, 30);
-    a_.bl("mesh");
-  }
-  mode(kMText);
-  text("s_atari", 100, 30, 24, 0xFFF4F0EA, false);
-  text("s_lion", 208, 30, 24, 0xFFE81E1E, false);
-  mode(kMAdd);
-  rect(100, 66, 600, 68, 0xFFA01818, 0xFF300808);
-
-  // Cards.
-  for (int i = 0; i < 3; ++i) {
-    const float cx = kCardX[i];
-    const std::string no_glow = L("card_noglow");
-    mode(kMBlend);
-    rect(cx - 72, 128, cx + 72, 320, 0xB0300A0A, 0xB0080404);
-    a_ << cmpwi(0, 20, i);
-    a_.bne(no_glow);
-    a_ << cmpwi(0, 19, kSubNone);
-    a_.bne(no_glow);
-    mode(kMAdd);
-    // Pulsing glow: 0.5 + 0.15 sin(3 * frame).
-    a_ << mulli(3, rFrame, 3) << clrlwi(3, 3, 24) << slwi(3, 3, 2) << add(3, 3, rPool) << lfs(5, int16_t(sin_), 3);
-    lf(6, 0.15f), lf(7, 0.5f);
-    a_ << fmadds(1, 5, 6, 7);
-    load(3, 0xFFC02A14);
-    a_.bl("shade");
-    a_ << lis(4, 0xFF00);
-    lf(1, cx), lf(2, 214), lf(3, 105), lf(4, 115);
-    a_.bl("fan");
-    a_.label(no_glow);
-    // Frame, brighter on the selected card.
-    mode(kMAdd);
-    a_ << lfs(1, int16_t(kCardBright + 4 * i), rRam);
-    lf(2, 0.5f);
-    a_ << fmuls(1, 1, 2);
-    load(3, 0xFFFF4A2A);
-    a_.bl("shade");
-    a_ << mr(4, 3);
-    for (auto [x0, y0, x1, y1] : {std::tuple{cx - 72, 128.0f, cx + 72, 130.0f}, std::tuple{cx - 72, 318.0f, cx + 72, 320.0f},
-                                  std::tuple{cx - 72, 128.0f, cx - 70, 320.0f}, std::tuple{cx + 70, 128.0f, cx + 72, 320.0f}}) {
-      lf(1, x0), lf(2, y0), lf(3, x1), lf(4, y1);
-      a_.bl("quad");
-    }
-    // Icon.
-    mode(kM3D);
-    a_ << lfs(1, int16_t(kIconYaw + 4 * i), rRam) << stfs(1, kXform, rRam);
-    lf(1, -12.0f);
-    a_ << stfs(1, kXform + 4, rRam) << lfs(1, int16_t(kCardScale + 4 * i), rRam);
-    lf(2, 0.8f);
-    a_ << fmuls(1, 1, 2) << stfs(1, kXform + 8, rRam);
-    const float t[3] = {float(i - 1) * 2.3094f, 0.40f, -6.0f};
-    for (int j = 0; j < 3; ++j) {
-      lf(1, t[j]);
-      a_ << stfs(1, int16_t(kXform + 12 + 4 * j), rRam);
-    }
-    a_.la(3, meshes[i]);
-    a_ << addi(4, rRam, kXform) << lfs(1, int16_t(kCardBright + 4 * i), rRam);
-    a_.bl("mesh");
-    // Label.
-    mode(kMText);
-    a_ << lfs(1, int16_t(kCardBright + 4 * i), rRam);
-    lf(2, 0.25f);
-    a_ << fadds(1, 1, 2);
-    a_.li32(3, 0xFFF4F0EA);
-    a_.bl("shade");
-    a_ << mr(4, 3);
-    a_.la(3, labels[i]);
-    lf(1, cx), lf(2, 286), lf(3, 16);
-    a_.bl("textc");
-  }
-
-  // Description of the selected item: r21 = first line, r22 = second line (amber) or 0.
-  {
-    a_ << li(22, 0) << cmpwi(0, 20, kItemDisc);
-    a_.bne("desc_not_disc");
-    a_ << lwz(0, kDiscState, rRam);
-    const std::pair<u32, const char*> disc_lines[] = {
-        {kNoDisc, "s_insert"}, {kReading, "s_reading"}, {kReady, "s_play"}, {kUnplayable, "s_unplayable"}};
-    for (auto [state, label] : disc_lines) {
-      const std::string next = L("desc_state");
-      a_ << cmpwi(0, 0, int16_t(state));
-      a_.bne(next);
-      a_.la(21, label);
-      if (state == kReady) a_ << addi(22, rRam, kLabel);
-      a_.b("desc_draw");
-      a_.label(next);
-    }
-    a_.label("desc_not_disc");
-    a_ << cmpwi(0, 20, kItemAudio);
-    a_.bne("desc_system");
-    a_.la(21, "s_audio_desc");
-    a_.la(22, "s_audio_desc2");
-    a_.b("desc_draw");
-    a_.label("desc_system");
-    a_.la(21, "s_system_desc");
-    a_.la(22, "s_system_desc2");
-    a_.label("desc_draw");
-    mode(kMText);
-    a_ << mr(3, 21);
-    load(4, 0xFFE6DCD2);
-    lf(1, 320), lf(2, 356), lf(3, 14);
-    a_.bl("textc");
-    a_ << cmpwi(0, 22, 0);
-    a_.beq("desc_one_line");
-    a_ << mr(3, 22);
-    load(4, 0xFFFFB040);
-    lf(1, 320), lf(2, 380), lf(3, 14);
-    a_.bl("textc");
-    a_.label("desc_one_line");
-  }
-
-  // Panels.
-  a_ << cmpwi(0, 19, kSubNone);
-  a_.beq("dash_no_panel");
-  mode(kMBlend);
-  rect(70, 104, 570, 404, 0xEC0C0405, 0xEC040203);
-  mode(kMAdd);
-  for (auto [x0, y0, x1, y1] : {std::tuple{70.0f, 104.0f, 570.0f, 106.0f}, std::tuple{70.0f, 402.0f, 570.0f, 404.0f}})
-    rect(x0, y0, x1, y1, 0xFFB02020, 0xFFB02020);
-  a_ << cmpwi(0, 19, kSubSystem);
-  a_.bne("panel_audio");
-  mode(kMText);
-  text("s_sysinfo", 320, 122, 18, 0xFFFF5A3A, true);
-  {
-    for (int i = 0; i < 7; ++i) {
-      const float y = 168.0f + 30.0f * float(i);
-      text("s_sys_k" + std::to_string(i), 96, y, 13, 0xFFFF9A40, false);
-      text("s_sys_v" + std::to_string(i), 232, y, 13, 0xFFE6DCD2, false);
-    }
-  }
-  a_.b("dash_panel_done");
-  a_.label("panel_audio");
-  mode(kMText);
-  text("s_soundtest", 320, 122, 18, 0xFFFF5A3A, true);
-  text("s_voices", 320, 160, 12, 0xFFB4A8A0, true);
-  // One bar per Tyke voice: height follows its volume while it plays.
-  mode(kM2D);
-  a_ << li(17, 0);
-  lf(20, 110.0f);
-  a_.label("bar_loop");
-  a_ << slwi(3, 17, 5) << add(3, 3, rTyke) << lwz(5, 0x100 + 20, 3) << lwz(6, 0x100 + 16, 3);
-  a_ << andi_(0, 5, 1);
-  a_.beq("bar_off");
-  a_ << srwi(7, 6, 16) << clrlwi(6, 6, 16) << add(6, 6, 7);
-  i2f(5, 6);
-  lf(6, 0.30f), lf(7, 10.0f);
-  a_ << fmadds(5, 5, 6, 7);
-  load(3, 0xFFFFC848), load(4, 0xFFE02020);
-  a_.b("bar_draw");
-  a_.label("bar_off");
-  lf(5, 6.0f);
-  load(3, 0xFF4A1010), load(4, 0xFF4A1010);
-  a_.label("bar_draw");
-  lf(4, 340.0f);
-  a_ << fsubs(2, 4, 5) << fmr(1, 20);
-  lf(6, 12.0f);
-  a_ << fadds(3, 20, 6);
-  a_.bl("quad");
-  lf(6, 18.0f);
-  a_ << fadds(20, 20, 6) << addi(17, 17, 1) << cmpwi(0, 17, Tyke::kChannels);
-  a_.blt("bar_loop");
-  mode(kMText);
-  text("s_voice_axis", 320, 352, 10, 0xFF806860, true);
-  a_.label("dash_panel_done");
-  a_.label("dash_no_panel");
-
-  // Button hints.
-  mode(kMText);
-  a_ << cmpwi(0, 19, kSubNone);
-  a_.bne("hint_sub");
-  text("s_hint_main", 320, 436, 12, 0xFF988880, true);
-  a_.b("hint_done");
-  a_.label("hint_sub");
-  a_ << cmpwi(0, 19, kSubAudio);
-  a_.bne("hint_back");
-  text("s_hint_audio", 320, 436, 12, 0xFF988880, true);
-  a_.b("hint_done");
-  a_.label("hint_back");
-  text("s_hint_back", 320, 436, 12, 0xFF988880, true);
-  a_.label("hint_done");
-
-  a_ << lfs(1, kFade, rRam);
-  a_.bl("fade");
-  a_.bl("end_frame");
-  a_.bl("seq_step");
-  // Launch once the screen is black.
-  a_ << lwz(0, kLaunch, rRam) << cmpwi(0, 0, 0);
-  a_.beq("dash_loop");
-  a_ << lfs(1, kFade, rRam) << fcmpu(0, 1, 30);
-  a_.blt("dash_loop");
-  a_.b("loading");
-}
-
-// ------------------------------------------------------------------ loading
-
 void RomBuilder::loading() {
   a_.label("loading");
   a_ << li(0, kSceneLoading) << stw(0, kScene, rRam);
+  a_.bl("music_stop");
   a_.bl("silence");
   a_ << li(3, 3) << li(4, 0);
   a_.bl("begin_frame");
@@ -1180,7 +774,8 @@ void RomBuilder::loader() {
   a << addi(27, 27, 12) << addi(26, 26, -1);
   a.b("segment");
 
-  // Hand over a quiet machine: interrupts masked, every voice off, unity master volume.
+  // Hand over a quiet machine: interrupts masked, every voice off. The Tyke
+  // settings (volume, tone, echo) stay as the player left them.
   a.label("enter");
   a.li32(3, map::kPic);
   a << li(0, 0) << stw(0, 4, 3) << li(0, -1) << stw(0, 0, 3);
@@ -1189,8 +784,6 @@ void RomBuilder::loader() {
   a.label("enter_quiet");
   a << stw(0, 0, 3) << addi(3, 3, 32);
   a.bdnz("enter_quiet");
-  a.li32(3, map::kTyke);
-  a << li(0, 0x100) << stw(0, 0, 3);
   a.li32(1, kStack);
   a << mtspr(26, 25);  // SRR0 = entry
   a.li32(3, Tuffy::kMsrMe | Tuffy::kMsrFp | Tuffy::kMsrVec);
@@ -1200,7 +793,8 @@ void RomBuilder::loader() {
   a.label("boot_fail");
   globals();
   video_init();
-  a << li(0, kUnplayable) << stw(0, kDiscState, rRam);
+  // The disc is looked at again (it may still hold music); its game is marked as failed.
+  a << li(0, kNoDisc) << stw(0, kDiscState, rRam) << li(0, 1) << stw(0, kBootFailed, rRam);
   a.la(3, "sfx_back");
   a.bl("sfx");
   a.b("dash_enter");
@@ -1240,36 +834,42 @@ void RomBuilder::data() {
   a_.label("pool");
   for (u32 w : pool_.words()) a_.word(w);
 
-  str("s_atari", "ATARI");
-  str("s_lion", "LION");
-  str("s_tagline", "INTERACTIVE ENTERTAINMENT SYSTEM");
-  str("s_disc", "DISC");
-  str("s_audio", "AUDIO");
-  str("s_system", "SYSTEM");
-  str("s_insert", "INSERT A LION DISC");
-  str("s_reading", "READING DISC...");
-  str("s_play", "PLAY DISC");
-  str("s_unplayable", "THIS DISC CANNOT BE PLAYED");
-  str("s_audio_desc", "SOUND TEST");
-  str("s_audio_desc2", "TYKE DSP  -  24 VOICES");
-  str("s_system_desc", "SYSTEM INFORMATION");
-  str("s_system_desc2", "TUFFY  QUACKER  SPIKE  TYKE");
-  str("s_sysinfo", "SYSTEM INFORMATION");
+  const std::pair<const char*, const char*> strings[] = {
+      {"s_atari", "ATARI"}, {"s_lion", "LION"}, {"s_a2", "A2"}, {"s_tagline", "INTERACTIVE ENTERTAINMENT SYSTEM"},
+      {"s_card0", "PLAY"}, {"s_card1", "MUSIC"}, {"s_card2", "THEME"}, {"s_card3", "TYKE"}, {"s_card4", "SYSTEM"},
+      {"s_insert", "INSERT A LION DISC"}, {"s_reading", "READING DISC..."}, {"s_play", "PLAY DISC"},
+      {"s_nogame", "NO GAME ON THIS DISC"}, {"s_unplayable", "THIS DISC CANNOT BE PLAYED"},
+      {"s_music_desc", "CD AUDIO PLAYER"}, {"s_music_desc2", "PLAY .WAV TRACKS FROM A DISC"},
+      {"s_theme_desc", "SOUND THEME"}, {"s_tyke_desc", "TYKE AUDIO"}, {"s_tyke_desc2", "VOLUME  BASS  TREBLE  ECHO"},
+      {"s_system_desc", "SYSTEM INFORMATION"}, {"s_system_desc2", "TUFFY  QUACKER  SPIKE  TYKE"},
+      {"s_sysinfo", "SYSTEM INFORMATION"}, {"s_cdaudio", "CD AUDIO"}, {"s_noaudio", "INSERT AN AUDIO DISC"},
+      {"s_notracks", "NO .WAV TRACKS ON THIS DISC"}, {"s_badwav", "UNSUPPORTED .WAV FILE"},
+      {"s_st0", "STOPPED"}, {"s_st1", "PLAYING"}, {"s_st2", "PAUSED"}, {"s_st3", "LOADING"},
+      {"s_theme_title", "SOUND THEME"}, {"s_tyke_title", "TYKE AUDIO"}, {"s_row0", "VOLUME"}, {"s_row1", "BASS"},
+      {"s_row2", "TREBLE"}, {"s_row3", "ECHO"}, {"s_spectrum", "SPECTRUM"}, {"s_scope", "OUTPUT"},
+      {"s_voices", "VOICES"}, {"s_now", "NOW PLAYING  "}, {"s_slash", " / "}, {"s_active", "*"},
+      {"s_hint_main", "<  >  CHOOSE      (A) SELECT"}, {"s_hint_back", "(B) BACK"},
+      {"s_hint_music", "UP DOWN  CHOOSE   (A) PLAY/PAUSE   (X) STOP   (B) BACK"},
+      {"s_hint_theme", "UP DOWN  CHOOSE    (A) SELECT    (B) BACK"},
+      {"s_hint_tyke", "UP DOWN  CHOOSE   < >  ADJUST   (A) JINGLE   (B) BACK"}, {"s_loading", "LOADING"},
+  };
+  for (auto [label, text] : strings) str(label, text);
   const char* lines[][2] = {{"CPU", "TUFFY  POWERPC 7400  500 MHZ"}, {"GEOMETRY", "QUACKER  MC88110  100 MHZ"},
                             {"GRAPHICS", "SPIKE  2 PIPELINES  90 MHZ"},  {"AUDIO", "TYKE DSP  24 VOICES  40 MHZ"},
                             {"MEMORY", "24 MB SDRAM + 8 MB SGRAM"},     {"STORAGE", "12X CD-ROM"},
-                            {"BOOT ROM", "VERSION 1.0  REV A2"}};
+                            {"BOOT ROM", "VERSION 1.1  REV A2"}};
   for (int i = 0; i < 7; ++i) {
     str("s_sys_k" + std::to_string(i), lines[i][0]);
     str("s_sys_v" + std::to_string(i), lines[i][1]);
   }
-  str("s_soundtest", "SOUND TEST");
-  str("s_voices", "TYKE MIXER  -  44.1 KHZ STEREO");
-  str("s_voice_axis", "VOICE 1                                    VOICE 24");
-  str("s_hint_main", "<  >  CHOOSE      (A) SELECT");
-  str("s_hint_audio", "(A) PLAY JINGLE      (B) BACK");
-  str("s_hint_back", "(B) BACK");
-  str("s_loading", "LOADING");
+  for (u32 t = 0; t < rom::kThemeCount; ++t) {
+    str("s_theme_name" + std::to_string(t), rom::kThemeNames[t]);
+    str("s_theme_blurb" + std::to_string(t), rom::kThemeBlurbs[t]);
+  }
+  a_.label("theme_names");
+  for (u32 t = 0; t < rom::kThemeCount; ++t) a_.addr_word("s_theme_name" + std::to_string(t));
+  a_.label("state_names");
+  for (int k = 0; k < 4; ++k) a_.addr_word("s_st" + std::to_string(k));
 
   auto blob = [&](const std::string& label, const std::vector<u32>& w) {
     a_.align(16);
@@ -1278,8 +878,11 @@ void RomBuilder::data() {
   };
   blob("mesh_emblem", rom::mesh_emblem());
   blob("mesh_emblem_small", rom::mesh_emblem(true));
+  blob("mesh_crown", rom::mesh_crown());
   blob("mesh_disc", rom::mesh_disc());
+  blob("mesh_note", rom::mesh_note());
   blob("mesh_audio", rom::mesh_audio());
+  blob("mesh_mixer", rom::mesh_mixer());
   blob("mesh_chip", rom::mesh_chip());
   blob("mesh_grid", rom::mesh_grid());
   {
@@ -1287,7 +890,23 @@ void RomBuilder::data() {
     for (float f : rom::intro_table()) t.push_back(f32_to_bits(f));
     blob("intro_tab", t);
   }
+  blob("plate_tab", rom::plate_table());
+  blob("slash_tab", rom::slash_table());
   blob("jingle_events", rom::jingle_events(bank_));
+  for (u32 t = 0; t < rom::kThemeCount; ++t) blob("theme_events" + std::to_string(t), rom::theme_events(bank_, t));
+  a_.label("theme_table");
+  const rom::LowLayout low = rom::low_layout();
+  for (u32 t = 0; t < rom::kThemeCount; ++t) {
+    a_.addr_word("theme_events" + std::to_string(t));
+    const int stream = rom::theme_stream(t);
+    a_.word(stream < 0 ? 0 : low.theme[stream]);
+  }
+  // IMA ADPCM tables for the stream decoder.
+  a_.align(4);
+  a_.label("ima_step");
+  for (int i = 0; i < 89; i += 2) a_.word(u32(u16(ima::kStep[i])) << 16 | (i + 1 < 89 ? u16(ima::kStep[i + 1]) : 0u));
+  a_.label("ima_index");
+  for (int v : ima::kIndex) a_.word(u32(v));
   blob("sfx_tick", rom::sfx_record(bank_.tick, 1.0, 0x70, 0x70));
   blob("sfx_ok", rom::sfx_record(bank_.ok, 1.0, 0x90, 0x90));
   blob("sfx_back", rom::sfx_record(bank_.back, 1.0, 0x90, 0x90));
@@ -1295,16 +914,21 @@ void RomBuilder::data() {
   a_.label("boot_name");
   str("boot_name_str", "BOOT.LION;1");
 
-  if (a_.here() > map::kRomBase + rom::kFontOffset) throw std::runtime_error("boot ROM: code and data overflow the font");
-  while (a_.here() < map::kRomBase + rom::kFontOffset) a_.word(0);
+  if (a_.here() > map::kRomVectors + rom::kFontOffset) throw std::runtime_error("boot ROM: code and data overflow the font");
+  code_end_ = a_.here();
+  auto bytes = [&](const std::vector<u8>& b) {
+    for (size_t i = 0; i < b.size(); i += 4) a_.word(u32(b[i]) << 24 | u32(b[i + 1]) << 16 | u32(b[i + 2]) << 8 | b[i + 3]);
+  };
+  while (a_.here() < map::kRomVectors + rom::kFontOffset) a_.word(0);
   a_.label("font");
-  const std::vector<u8> font = rom::font_texture();
-  for (size_t i = 0; i < font.size(); i += 4)
-    a_.word(u32(font[i]) << 24 | u32(font[i + 1]) << 16 | u32(font[i + 2]) << 8 | font[i + 3]);
-  while (a_.here() < map::kRomBase + rom::kSampleOffset) a_.word(0);
+  bytes(rom::font_texture());
+  while (a_.here() < map::kRomVectors + rom::kJaguarOffset) a_.word(0);
+  a_.label("jaguar");
+  bytes(rom::jaguar_texture());
+  if (a_.here() > map::kRomVectors + rom::kSampleOffset) throw std::runtime_error("boot ROM: textures overflow");
+  while (a_.here() < map::kRomVectors + rom::kSampleOffset) a_.word(0);
   if (rom::kSampleOffset + bank_.pcm.size() > map::kRomSize) throw std::runtime_error("boot ROM: samples overflow");
-  for (size_t i = 0; i < bank_.pcm.size(); i += 4)
-    a_.word(u32(bank_.pcm[i]) << 24 | u32(bank_.pcm[i + 1]) << 16 | u32(bank_.pcm[i + 2]) << 8 | bank_.pcm[i + 3]);
+  bytes(bank_.pcm);
 }
 
 std::vector<u8> RomBuilder::build() {
@@ -1327,22 +951,44 @@ std::vector<u8> RomBuilder::build() {
       uv.push_back(float(ch / 16) / 8.0f);
     }
     uv_ = pool_.table(uv);
+    // Visualizer: Hann window and Goertzel coefficients for 16 log-spaced bands (120 Hz - 12 kHz).
+    std::vector<float> hann, coeff;
+    for (int i = 0; i < 256; ++i) hann.push_back(float(0.5 - 0.5 * std::cos(2.0 * 3.14159265358979323846 * i / 255.0)));
+    for (int b = 0; b < kVizBands; ++b) {
+      const double hz = 120.0 * std::pow(100.0, b / double(kVizBands - 1));
+      coeff.push_back(float(2.0 * std::cos(2.0 * 3.14159265358979323846 * hz / kAudioRate)));
+    }
+    hann_ = pool_.table(hann);
+    goertzel_ = pool_.table(coeff);
   }
   vectors();
   reset();
   routines();
+  audio_routines();
   intro();
   dashboard();
   loading();
   loader();
   data();
-  std::vector<u8> rom = a_.finish();
-  rom.resize(map::kRomSize, 0);
+  // The last megabyte holds the code; the converted audio goes below it.
+  const std::vector<u8> code = a_.finish();
+  std::vector<u8> rom(map::kRomSize, 0);
+  if (code.size() > map::kRomBase + map::kRomSize - map::kRomVectors) throw std::runtime_error("boot ROM: code too large");
+  std::copy(code.begin(), code.end(), rom.begin() + (map::kRomVectors - map::kRomBase));
+  const rom::LowLayout low = rom::low_layout();
+  if (low.end > map::kRomVectors) throw std::runtime_error("boot ROM: audio overflows into the code");
+  auto put = [&](u32 addr, const rom::Blob& b) { std::copy(b.data, b.data + b.size, rom.begin() + (addr - map::kRomBase)); };
+  for (int t = 0; t < rom::kStreamThemes; ++t) put(low.theme[t], rom::theme_ladp(t));
+  put(low.roar, rom::roar_pcm());
+  put(low.claws, rom::claws_pcm());
   return rom;
 }
 
-}  // namespace
+}  // namespace romgen
 
-std::vector<u8> build_boot_rom() { return RomBuilder().build(); }
+std::vector<u8> build_boot_rom() {
+  static const std::vector<u8> rom = romgen::RomBuilder().build();  // the same for every console
+  return rom;
+}
 
 }  // namespace lion

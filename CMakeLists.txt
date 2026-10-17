@@ -18,6 +18,11 @@ add_library(lioncore STATIC
   src/bus.cpp
   src/bootrom.cpp
   src/rom/assets.cpp
+  src/rom/intro.cpp
+  src/rom/dashboard.cpp
+  src/rom/audio.cpp
+  src/rom/music.cpp
+  src/rom/blobs.cpp
   src/cdrom.cpp
   src/pic.cpp
   src/vi.cpp
@@ -38,6 +43,14 @@ add_library(lioncore STATIC
   src/tyke/firmware.cpp
 )
 target_include_directories(lioncore PUBLIC src tools)
+# Audio baked into the boot ROM, pulled in with .incbin (src/rom/blobs.cpp).
+set(LION_ROM_AUDIO
+  ${CMAKE_SOURCE_DIR}/Assets/rom/roar.pcm
+  ${CMAKE_SOURCE_DIR}/Assets/rom/claws.pcm
+  ${CMAKE_SOURCE_DIR}/Assets/rom/theme1.ladp
+  ${CMAKE_SOURCE_DIR}/Assets/rom/theme2.ladp)
+target_compile_definitions(lioncore PRIVATE LION_ROM_AUDIO_DIR="${CMAKE_SOURCE_DIR}/Assets/rom")
+set_source_files_properties(src/rom/blobs.cpp PROPERTIES OBJECT_DEPENDS "${LION_ROM_AUDIO}")
 find_package(Threads REQUIRED)
 target_link_libraries(lioncore PUBLIC Threads::Threads)
 
@@ -48,6 +61,10 @@ target_include_directories(lionasm INTERFACE tools)
 find_package(SDL2 REQUIRED)
 add_executable(lion src/main.cpp)
 target_link_libraries(lion PRIVATE lioncore SDL2::SDL2)
+
+# Converts audio for the boot ROM (see tools/convert_assets.sh).
+add_executable(lionasset tools/lionasset.cpp)
+target_include_directories(lionasset PRIVATE tools)
 
 add_executable(mkdemo tools/mkdemo.cpp)
 target_link_libraries(mkdemo PRIVATE lioncore lionasm)

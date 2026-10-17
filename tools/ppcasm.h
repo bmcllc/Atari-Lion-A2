@@ -94,6 +94,11 @@ inline u32 stmw(u32 s, int16_t o, u32 a) { return D(47, s, a, u32(o)); }
 inline u32 lwzx(u32 d, u32 a, u32 b) { return X(31, d, a, b, 23); }
 inline u32 stwx(u32 s, u32 a, u32 b) { return X(31, s, a, b, 151); }
 inline u32 lwbrx(u32 d, u32 a, u32 b) { return X(31, d, a, b, 534); }
+inline u32 lhbrx(u32 d, u32 a, u32 b) { return X(31, d, a, b, 790); }
+inline u32 lbzx(u32 d, u32 a, u32 b) { return X(31, d, a, b, 87); }
+inline u32 lhzx(u32 d, u32 a, u32 b) { return X(31, d, a, b, 279); }
+inline u32 stbx(u32 s, u32 a, u32 b) { return X(31, s, a, b, 215); }
+inline u32 sthx(u32 s, u32 a, u32 b) { return X(31, s, a, b, 407); }
 inline u32 lwarx(u32 d, u32 a, u32 b) { return X(31, d, a, b, 20); }
 inline u32 stwcx_(u32 s, u32 a, u32 b) { return X(31, s, a, b, 150, 1); }
 inline u32 dcbz(u32 a, u32 b) { return X(31, 0, a, b, 1014); }
@@ -112,6 +117,7 @@ inline u32 fadds(u32 d, u32 a, u32 b) { return A(59, d, a, b, 0, 21); }
 inline u32 fmuls(u32 d, u32 a, u32 c) { return A(59, d, a, 0, c, 25); }
 inline u32 fmadds(u32 d, u32 a, u32 c, u32 b) { return A(59, d, a, b, c, 29); }
 inline u32 fsubs(u32 d, u32 a, u32 b) { return A(59, d, a, b, 0, 20); }
+inline u32 fnmsubs(u32 d, u32 a, u32 c, u32 b) { return A(59, d, a, b, c, 30); }  // b - a * c
 inline u32 fdivs(u32 d, u32 a, u32 b) { return A(59, d, a, b, 0, 18); }
 inline u32 fsel(u32 d, u32 a, u32 c, u32 b) { return A(63, d, a, b, c, 23); }
 inline u32 fabs_(u32 d, u32 b) { return X(63, d, 0, b, 264); }
@@ -207,6 +213,8 @@ class Asm {
     while (here() % bytes) emit(0);
   }
   void word(u32 w) { emit(w); }
+  // A data word holding a label's address.
+  void addr_word(const std::string& l) { fix(l, 0, Kind::Abs32); }
   void f32(float f) {
     u32 w;
     static_assert(sizeof(f) == 4);
@@ -231,6 +239,7 @@ class Asm {
           break;
         case Kind::Hi: w |= target >> 16; break;
         case Kind::Lo: w |= target & 0xFFFF; break;
+        case Kind::Abs32: w = target; break;
       }
     }
     std::vector<uint8_t> out;
@@ -246,7 +255,7 @@ class Asm {
   u32 origin() const { return origin_; }
 
  private:
-  enum class Kind { B24, B14, Hi, Lo };
+  enum class Kind { B24, B14, Hi, Lo, Abs32 };
   struct Fix {
     size_t index;
     std::string label;

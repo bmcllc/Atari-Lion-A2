@@ -7,6 +7,7 @@
 #include <tuple>
 
 #include "bus.h"
+#include "rom/blobs.h"
 
 namespace lion::rom {
 
@@ -243,6 +244,76 @@ std::vector<double> blip(std::initializer_list<std::pair<double, double>> steps,
   return s;
 }
 
+// Claws raking metal: band-passed noise sweeping down, broken into grains.
+std::vector<double> claw(double seconds) {
+  const size_t n = size_t(seconds * kAudioRate);
+  std::vector<double> s(n);
+  u32 lcg = 0xC1A3'5EED;
+  double lp = 0, hp = 0, prev = 0;
+  for (size_t i = 0; i < n; ++i) {
+    const double t = double(i) / kAudioRate, u = t / seconds;
+    lcg = lcg * 1664525u + 1013904223u;
+    const double noise = double(s32(lcg)) / 2147483648.0;
+    const double cutoff = 5200 * std::pow(0.18, u);
+    const double a = 1 - std::exp(-2 * kPi * cutoff / kAudioRate);
+    lp += a * (noise - lp);
+    hp = 0.97 * (hp + lp - prev);  // drop the lows: a thin, metallic rasp
+    prev = lp;
+    const double grain = 0.55 + 0.45 * std::sin(2 * kPi * (90 + 160 * u) * t);
+    const double env = std::min(1.0, t / 0.004) * std::pow(1 - u, 2.2);
+    s[i] = env * grain * hp;
+  }
+  normalize(s, 10000);
+  return s;
+}
+
+// Karplus-Strong plucked string.
+std::vector<double> pluck(double hz, double seconds) {
+  const size_t n = size_t(seconds * kAudioRate), period = size_t(kAudioRate / hz + 0.5);
+  std::vector<double> line(period), s(n);
+  u32 lcg = 0x0B0E'5EED;
+  for (double& v : line) {
+    lcg = lcg * 1664525u + 1013904223u;
+    v = double(s32(lcg)) / 2147483648.0;
+  }
+  for (size_t i = 0; i < n; ++i) {
+    const size_t k = i % period;
+    s[i] = line[k];
+    line[k] = 0.4985 * (line[k] + line[(k + 1) % period]);
+  }
+  for (size_t i = n - 400; i < n; ++i) s[i] *= double(n - i) / 400.0;
+  normalize(s, 8000);
+  return s;
+}
+
+std::vector<double> kick(double seconds) {
+  const size_t n = size_t(seconds * kAudioRate);
+  std::vector<double> s(n);
+  double phase = 0;
+  for (size_t i = 0; i < n; ++i) {
+    const double t = double(i) / kAudioRate;
+    phase += (45 + 95 * std::exp(-t / 0.03)) / kAudioRate;
+    s[i] = std::sin(2 * kPi * phase) * std::exp(-t / 0.09) + (t < 0.002 ? 0.5 : 0.0);
+  }
+  normalize(s, 11000);
+  return s;
+}
+
+std::vector<double> hat(double seconds) {
+  const size_t n = size_t(seconds * kAudioRate);
+  std::vector<double> s(n);
+  u32 lcg = 0x4A75'0001;
+  double prev = 0;
+  for (size_t i = 0; i < n; ++i) {
+    lcg = lcg * 1664525u + 1013904223u;
+    const double noise = double(s32(lcg)) / 2147483648.0;
+    s[i] = (noise - prev) * std::exp(-double(i) / kAudioRate / 0.012);
+    prev = noise;
+  }
+  normalize(s, 6000);
+  return s;
+}
+
 void ease(double& v) { v = 1 - std::pow(1 - std::clamp(v, 0.0, 1.0), 3); }
 double ramp(double f, double a, double b) { return std::clamp((f - a) / (b - a), 0.0, 1.0); }
 double smooth(double f, double a, double b) {
@@ -407,9 +478,27 @@ std::vector<u32> mesh_grid() {
   return m.words();
 }
 
+LowLayout low_layout() {
+  LowLayout l{};
+  u32 at = map::kRomBase;
+  auto place = [&](size_t bytes) {
+    const u32 addr = at;
+    at += u32((bytes + 15) & ~size_t(15));
+    return addr;
+  };
+  for (int t = 0; t < kStreamThemes; ++t) l.theme[t] = place(theme_ladp(t).size);
+  l.roar = place(roar_pcm().size);
+  l.claws = place(claws_pcm().size);
+  l.end = at;
+  return l;
+}
+
 SoundBank sound_bank() {
   SoundBank bank;
-  const u32 base = map::kRomBase + kSampleOffset;
+  const LowLayout low = low_layout();
+  bank.lion_roar = {low.roar, u32(roar_pcm().size / 2), 0};
+  bank.lion_claws = {low.claws, u32(claws_pcm().size / 2), 0};
+  const u32 base = map::kRomVectors + kSampleOffset;
   auto add = [&](const std::vector<double>& s, double hz) {
     SampleRef r{base + u32(bank.pcm.size()), u32(s.size()), hz};
     for (double v : s) {
@@ -426,6 +515,10 @@ SoundBank sound_bank() {
   bank.tick = add(blip({{1600, 0.045}}, 0.012), 0);
   bank.ok = add(blip({{880, 0.06}, {1320, 0.14}}, 0.05), 0);
   bank.back = add(blip({{660, 0.06}, {440, 0.11}}, 0.04), 0);
+  bank.claw = add(claw(0.34), 0);
+  bank.pluck = add(pluck(220.0, 0.8), 220.0);
+  bank.kick = add(kick(0.3), 0);
+  bank.hat = add(hat(0.06), 0);
   return bank;
 }
 
@@ -433,65 +526,138 @@ std::vector<u32> sfx_record(const SampleRef& s, double pitch, u32 left, u32 righ
   return {s.addr, s.length, u32(std::lround(pitch * 65536)), left << 16 | right};
 }
 
-std::vector<u32> jingle_events(const SoundBank& bank) {
-  struct Ev {
-    u32 frame, offset, value;
-  };
-  std::vector<Ev> ev;
-  auto reg = [](int ch, int r) { return u32(0x100 + 32 * ch + 4 * r); };
-  enum { kStart, kLength, kLoop, kPitch, kVolume, kCtrl };
-  auto vol = [](double l, double r) { return u32(std::lround(l * 256)) << 16 | u32(std::lround(r * 256)); };
-  auto pitch = [](double ratio) { return u32(std::lround(ratio * 65536)); };
-  auto voice = [&](u32 frame, int ch, const SampleRef& s, double ratio, double l, double r, bool loop) {
-    ev.push_back({frame, reg(ch, kStart), s.addr});
-    ev.push_back({frame, reg(ch, kLength), s.length});
-    ev.push_back({frame, reg(ch, kLoop), loop ? 0 : s.length});
-    ev.push_back({frame, reg(ch, kPitch), pitch(ratio)});
-    ev.push_back({frame, reg(ch, kVolume), vol(l, r)});
-    ev.push_back({frame, reg(ch, kCtrl), loop ? 3u : 1u});
-  };
-  // Volume envelope: linear segments sampled every other frame.
-  auto envelope = [&](int ch, std::initializer_list<std::pair<u32, double>> points, double pan) {
-    auto p = points.begin();
-    for (auto q = std::next(p); q != points.end(); ++p, ++q)
-      for (u32 f = p->first; f < q->first; f += 2) {
-        const double v = p->second + (q->second - p->second) * double(f - p->first) / double(q->first - p->first);
-        ev.push_back({f, reg(ch, kVolume), vol(v * (1 - pan), v * (1 + pan))});
-      }
-    ev.push_back({p->first, reg(ch, kVolume), vol(p->second * (1 - pan), p->second * (1 + pan))});
-  };
-
-  ev.push_back({0, 0, 0x100});  // master volume
-  for (int ch = 0; ch < 16; ++ch) ev.push_back({0, reg(ch, kCtrl), 0});
-
-  // The roar, doubled an octave down.
-  voice(3, 0, bank.roar, 1.0, 0.70, 0.70, false);
-  voice(5, 1, bank.roar, 0.72, 0.42, 0.30, false);
-  // Sub drone on A1 under the whole intro.
-  voice(3, 2, bank.pad, 55.0 / bank.pad.base_hz, 0, 0, true);
-  envelope(2, {{3, 0.0}, {70, 0.42}, {170, 0.42}, {232, 0.0}}, 0.0);
-  ev.push_back({234, reg(2, kCtrl), 0});
-
-  // Frame 98: the hit, timed with the flash. A2 and A5 bells under an A major arpeggio.
-  voice(98, 3, bank.bell, 0.25, 0.55, 0.55, false);
-  voice(98, 4, bank.bell, 2.0, 0.14, 0.18, false);
-  const double arp[5] = {220.0, 329.63, 440.0, 554.37, 659.26};
-  const double pans[5][2] = {{0.50, 0.30}, {0.30, 0.50}, {0.42, 0.42}, {0.50, 0.22}, {0.22, 0.50}};
-  for (int k = 0; k < 5; ++k) voice(98 + 6 * u32(k), 5 + k, bank.bell, arp[k] / 440.0, pans[k][0], pans[k][1], false);
-  // Warm pad chord, slightly detuned against itself.
-  const double chord[6] = {110.0, 164.81, 220.0, 277.18, 329.63, 440.0};
-  for (int k = 0; k < 6; ++k) {
-    const int ch = 10 + k;
-    voice(98, ch, bank.pad, chord[k] / bank.pad.base_hz * (k % 2 ? 1.003 : 0.997), 0, 0, true);
-    envelope(ch, {{98, 0.0}, {130, 0.14}, {185, 0.14}, {236, 0.0}}, k % 2 ? 0.35 : -0.35);
-    ev.push_back({238, reg(ch, kCtrl), 0});
+std::vector<u8> jaguar_texture() {
+  constexpr int kW = 256, kH = 64;
+  std::vector<double> r(kW * kH), g(kW * kH), b(kW * kH);
+  // Brushed metal with a bevelled frame.
+  u32 lcg = 0x7A6A'0001;
+  for (int y = 0; y < kH; ++y) {
+    lcg = lcg * 1664525u + 1013904223u;
+    const double streak = double(lcg >> 24) / 255.0 * 0.06;
+    for (int x = 0; x < kW; ++x) {
+      double v = 0.20 + 0.10 * (1 - double(y) / kH) + streak;
+      if (y < 3 || x < 3) v += 0.30;
+      if (y >= kH - 3 || x >= kW - 3) v -= 0.12;
+      r[size_t(y * kW + x)] = g[size_t(y * kW + x)] = v;
+      b[size_t(y * kW + x)] = v * 1.08;
+    }
   }
-
-  std::stable_sort(ev.begin(), ev.end(), [](const Ev& a, const Ev& b) { return a.frame < b.frame; });
-  std::vector<u32> out;
-  for (const Ev& e : ev) out.insert(out.end(), {e.frame, e.offset, e.value});
-  out.insert(out.end(), {0xFFFF'FFFFu, 0, 0});
+  // Italic block letters, 6x6 per font pixel, sheared to the right.
+  const char* word = "JAGUAR";
+  auto letter_px = [&](int px, int py, double shear, bool shadow) {
+    for (int k = 0; k < 6; ++k) {
+      const int x = 20 + px + int(shear * (42 - (py + k))) + (shadow ? 3 : 0), y = 11 + py + k + (shadow ? 3 : 0);
+      for (int j = 0; j < 6; ++j) {
+        const int xx = x + j;
+        if (xx < 0 || xx >= kW || y < 0 || y >= kH) continue;
+        const size_t i = size_t(y * kW + xx);
+        if (shadow) {
+          r[i] *= 0.35, g[i] *= 0.35, b[i] *= 0.35;
+        } else {
+          const double t = double(py + k) / 42.0;  // red at the top, orange at the bottom
+          r[i] = 0.95, g[i] = 0.10 + 0.45 * t, b[i] = 0.05;
+        }
+      }
+    }
+  };
+  for (int pass = 0; pass < 2; ++pass)
+    for (int c = 0; c < 6; ++c) {
+      const Glyph* gl = nullptr;
+      for (const Glyph& k : kGlyphs)
+        if (k.c == word[c]) gl = &k;
+      for (int row = 0; row < 7; ++row)
+        for (int col = 0; col < 5; ++col)
+          if (gl->rows[row] >> (4 - col) & 1) letter_px(c * 36 + col * 6, row * 6, 0.22, pass == 0);
+    }
+  std::vector<u8> out;
+  for (size_t i = 0; i < r.size(); ++i) {
+    auto q = [](double v, int bits) { return u32(std::clamp(v, 0.0, 1.0) * ((1 << bits) - 1) + 0.5); };
+    const u16 p = u16(q(r[i], 5) << 11 | q(g[i], 6) << 5 | q(b[i], 5));
+    out.push_back(u8(p >> 8));
+    out.push_back(u8(p));
+  }
   return out;
+}
+
+std::vector<u32> mesh_crown() {
+  MeshBuilder m;
+  const u32 gold = argb(0.98, 0.74, 0.22), ruby = argb(0.90, 0.08, 0.16);
+  constexpr int kSeg = 16;
+  const float r = 0.64f, t = 0.05f, y0 = 1.24f, y1 = 1.52f;
+  auto at = [](float rad, float ang, float y) { return V3{rad * std::sin(ang), y, rad * std::cos(ang)}; };
+  // Band: a short thick-walled tube.
+  for (int k = 0; k < kSeg; ++k) {
+    const float a0 = float(2 * kPi * k / kSeg), a1 = float(2 * kPi * (k + 1) / kSeg), am = (a0 + a1) / 2;
+    const V3 inside = at(r, am, (y0 + y1) / 2);
+    m.quad(at(r + t, a0, y0), at(r + t, a1, y0), at(r + t, a1, y1), at(r + t, a0, y1), gold, inside);
+    m.quad(at(r - t, a0, y0), at(r - t, a1, y0), at(r - t, a1, y1), at(r - t, a0, y1), gold, inside);
+    m.quad(at(r - t, a0, y1), at(r + t, a0, y1), at(r + t, a1, y1), at(r - t, a1, y1), gold, inside);
+    m.quad(at(r - t, a0, y0), at(r + t, a0, y0), at(r + t, a1, y0), at(r - t, a1, y0), gold, inside);
+  }
+  // Eight points, tall and short, with rubies on the tall ones and on the band.
+  for (int k = 0; k < 8; ++k) {
+    const float a = float(2 * kPi * k / 8), w = 0.20f, h = k % 2 ? 0.42f : 0.70f;
+    const V3 b1 = at(r + t, a - w, y1), b2 = at(r + t, a + w, y1), b3 = at(r - t, a + w, y1), b4 = at(r - t, a - w, y1);
+    const V3 tip = at(r, a, y1 + h), inside = at(r, a, y1 + h * 0.25f);
+    m.tri(b1, b2, tip, gold, inside);
+    m.tri(b2, b3, tip, gold, inside);
+    m.tri(b3, b4, tip, gold, inside);
+    m.tri(b4, b1, tip, gold, inside);
+    auto gem = [&](V3 c, float s) {
+      const V3 px{s, 0, 0}, py{0, s, 0}, pz{0, 0, s};
+      const V3 v[6] = {c + px, c - px, c + py, c - py, c + pz, c - pz};
+      const int f[8][3] = {{0, 2, 4}, {4, 2, 1}, {1, 2, 5}, {5, 2, 0}, {0, 4, 3}, {4, 1, 3}, {1, 5, 3}, {5, 0, 3}};
+      for (auto& tr : f) m.tri(v[tr[0]], v[tr[1]], v[tr[2]], ruby, c);
+    };
+    if (h > 0.5f) gem(at(r, a, y1 + h + 0.06f), 0.08f);
+    if (k % 2 == 0) gem(at(r + t + 0.03f, a, (y0 + y1) / 2), 0.07f);
+  }
+  return m.words();
+}
+
+std::vector<u32> mesh_note() {
+  MeshBuilder m;
+  const u32 gold = argb(1.0, 0.72, 0.20);
+  // Head: a tilted elliptic disc.
+  constexpr int kSeg = 14;
+  const float tilt = -0.45f, cx = -0.25f, cy = -0.62f;
+  auto head = [&](float ang, float z) {
+    const float x = 0.36f * std::cos(ang), y = 0.24f * std::sin(ang);
+    return V3{cx + x * std::cos(tilt) - y * std::sin(tilt), cy + x * std::sin(tilt) + y * std::cos(tilt), z};
+  };
+  const V3 centre{cx, cy, 0};
+  for (int k = 0; k < kSeg; ++k) {
+    const float a0 = float(2 * kPi * k / kSeg), a1 = float(2 * kPi * (k + 1) / kSeg);
+    m.tri(V3{cx, cy, 0.12f}, head(a0, 0.12f), head(a1, 0.12f), gold, centre);
+    m.tri(V3{cx, cy, -0.12f}, head(a0, -0.12f), head(a1, -0.12f), gold, centre);
+    m.quad(head(a0, -0.12f), head(a1, -0.12f), head(a1, 0.12f), head(a0, 0.12f), gold, centre);
+  }
+  // Stem and flag.
+  m.box({0.07f, 0.25f, 0}, {0.05f, 0.85f, 0.06f}, gold);
+  std::vector<V3> flag;
+  for (int k = 0; k <= 4; ++k) {
+    const float u = float(k) / 4;
+    flag.push_back({0.12f + 0.42f * u, 1.08f - 0.75f * u * u - 0.2f * u, 0});
+  }
+  m.sweep(flag, [&](size_t i) {
+    const V3 p = flag[i];
+    return std::array<V3, 4>{V3{p.x, p.y - 0.09f, -0.05f}, V3{p.x, p.y + 0.09f, -0.05f}, V3{p.x, p.y + 0.09f, 0.05f},
+                             V3{p.x, p.y - 0.09f, 0.05f}};
+  }, gold, true);
+  return m.words();
+}
+
+std::vector<u32> mesh_mixer() {
+  MeshBuilder m;
+  m.box({0, 0, 0}, {0.85f, 0.75f, 0.10f}, argb(0.20, 0.20, 0.24));
+  const float level[3] = {0.30f, -0.25f, 0.10f};
+  const u32 cap[3] = {argb(0.95, 0.15, 0.12), argb(1.0, 0.65, 0.18), argb(0.92, 0.90, 0.86)};
+  for (int k = 0; k < 3; ++k) {
+    const float x = -0.5f + 0.5f * float(k);
+    m.box({x, 0, 0.12f}, {0.04f, 0.62f, 0.02f}, argb(0.05, 0.05, 0.06));  // track
+    m.box({x, level[k], 0.20f}, {0.16f, 0.09f, 0.08f}, cap[k]);           // knob
+  }
+  return m.words();
 }
 
 std::vector<float> intro_table() {
@@ -499,26 +665,111 @@ std::vector<float> intro_table() {
   for (u32 f = 0; f < kIntroFrames; ++f) {
     float* row = &t[f * kIntroColumns];
     const double fr = f;
-    double e = ramp(fr, 8, 100);
+    double e = ramp(fr, 132, 205);
     ease(e);
     // Two decelerating turns, then a slow sway.
-    const double sway = fr > 100 ? 3.0 * std::sin((fr - 100) / 40.0) * smooth(fr, 100, 140) : 0.0;
+    const double sway = fr > 205 ? 3.0 * std::sin((fr - 205) / 40.0) * smooth(fr, 205, 245) : 0.0;
     row[0] = float(512.0 * (1 - e) + sway);
     row[1] = float(10.0 * (1 - e));
     row[2] = float(0.05 + 0.95 * e);
     row[3] = 0.0f;
-    row[4] = 0.55f;
-    row[5] = -4.6f;
-    row[6] = float(ramp(fr, 8, 40));
-    const double pulse = fr > 110 ? 0.08 * std::sin((fr - 110) / 9.0) : 0.0;
-    row[7] = float(0.95 * smooth(fr, 40, 100) - 0.25 * smooth(fr, 100, 130) + pulse);
-    row[8] = float(smooth(fr, 104, 134));
-    row[9] = float(smooth(fr, 118, 148));
-    row[10] = float(0.75 * smooth(fr, 145, 175));
-    row[11] = fr >= 98 && fr < 116 ? float(0.55 * std::pow(1 - (fr - 98) / 18.0, 2)) : 0.0f;
-    row[12] = float(1.0 - ramp(fr, 0, 10) + ramp(fr, 206, 236));
+    row[4] = 0.42f;
+    row[5] = -7.0f;
+    row[6] = float(ramp(fr, 130, 150));
+    const double pulse = fr > 215 ? 0.08 * std::sin((fr - 215) / 9.0) : 0.0;
+    row[7] = float(0.95 * smooth(fr, 132, 190) - 0.25 * smooth(fr, 190, 220) + pulse);
+    row[8] = float(smooth(fr, 214, 240));
+    row[9] = float(smooth(fr, 224, 250));
+    row[10] = float(0.75 * smooth(fr, 262, 290));
+    row[11] = fr >= 128 && fr < 146 ? float(0.65 * std::pow(1 - (fr - 128) / 18.0, 2)) : 0.0f;
+    row[12] = float(1.0 - ramp(fr, 0, 12) + ramp(fr, 326, 356));
+    // The crown drops onto the mane and settles with a small bounce.
+    const double c = ramp(fr, 196, 216);
+    const double bounce = fr > 216 ? 0.10 * std::exp(-(fr - 216) / 7.0) * std::fabs(std::sin((fr - 216) / 3.0)) : 0.0;
+    row[13] = float(7.0 * (1 - c) * (1 - c) + bounce);
+    row[14] = float(smooth(fr, 238, 262));
+    row[15] = float(0.8 * smooth(fr, 18, 40) * (1 - smooth(fr, 70, 112)) + 0.5 * smooth(fr, 112, 124) * (1 - smooth(fr, 128, 150)));
   }
   return t;
 }
 
+namespace {
+// Plate geometry on screen and the three cuts (x at the plate's centre line, slanted).
+constexpr float kPlateX0 = 128, kPlateY0 = 152, kPlateX1 = 512, kPlateY1 = 248, kPlateCy = 200, kSlant = 0.42f;
+constexpr float kCutX[3] = {224, 320, 416};
+float cut_x(int k, float y) { return kCutX[k] - kSlant * (y - kPlateCy); }
+}  // namespace
+
+std::vector<u32> plate_table() {
+  std::vector<u32> out;
+  for (u32 f = kPlateFirst; f < kPlateLast; ++f) {
+    const double fr = f;
+    // The roar shakes the plate.
+    const double shake = 5.0 * smooth(fr, 22, 34) * (1 - smooth(fr, 70, 100));
+    const float sx = float(shake * std::sin(fr * 1.7)), sy = float(shake * 0.6 * std::cos(fr * 2.3));
+    for (u32 s = 0; s < kPlateStrips; ++s) {
+      // Corners at rest: TL, TR, BR, BL.
+      float x[4], y[4] = {kPlateY0, kPlateY0, kPlateY1, kPlateY1};
+      x[0] = s == 0 ? kPlateX0 : cut_x(int(s) - 1, kPlateY0);
+      x[1] = s == 3 ? kPlateX1 : cut_x(int(s), kPlateY0);
+      x[2] = s == 3 ? kPlateX1 : cut_x(int(s), kPlateY1);
+      x[3] = s == 0 ? kPlateX0 : cut_x(int(s) - 1, kPlateY1);
+      float u[4], v[4];
+      for (int k = 0; k < 4; ++k) u[k] = (x[k] - kPlateX0) / (kPlateX1 - kPlateX0), v[k] = (y[k] - kPlateY0) / (kPlateY1 - kPlateY0);
+      // Torn apart: pieces fly outwards, spin and fall.
+      float ox = sx, oy = sy, rot = 0, alpha = float(ramp(fr, kPlateFirst, kPlateFirst + 10));
+      if (f >= kTearFrame) {
+        const float n = float(f - kTearFrame), side = float(s) - 1.5f;
+        ox += side * 2.4f * n;
+        oy += -1.6f * n + 0.11f * n * n;
+        rot = side * 0.014f * n;
+        alpha *= float(1 - smooth(fr, 140, 176));
+      }
+      const float cx = (x[0] + x[1] + x[2] + x[3]) / 4, cy = (y[0] + y[1] + y[2] + y[3]) / 4;
+      out.push_back(u32(std::lround(alpha * 255)) << 24 | 0xFFFFFF);
+      for (int k = 0; k < 4; ++k) {
+        const float dx = x[k] - cx, dy = y[k] - cy;
+        out.push_back(f32_to_bits(cx + ox + dx * std::cos(rot) - dy * std::sin(rot)));
+        out.push_back(f32_to_bits(cy + oy + dx * std::sin(rot) + dy * std::cos(rot)));
+        out.push_back(f32_to_bits(u[k]));
+        out.push_back(f32_to_bits(v[k]));
+      }
+    }
+  }
+  return out;
+}
+
+std::vector<u32> slash_table() {
+  std::vector<u32> out;
+  for (u32 f = kSlashFirst; f < kSlashLast; ++f) {
+    for (u32 k = 0; k < kSlashes; ++k) {
+      const double fr = f, s0 = kSlashFrame[k];
+      // The streak runs from above the plate to below it in five frames, then fades.
+      const double head = ramp(fr, s0, s0 + 5), tail = 0.25 * ramp(fr, s0 + 3, s0 + 12);
+      const double glow = (1 - smooth(fr, s0 + 6, s0 + 32));
+      const bool visible = fr >= s0 && glow > 0.0;
+      const float ya = 128, yb = 272;
+      auto point = [&](double t) {
+        const float y = float(ya + (yb - ya) * t);
+        return std::pair{cut_x(int(k), y), y};
+      };
+      const auto [hx, hy] = point(head);
+      const auto [tx, ty] = point(tail);
+      // Perpendicular to the cut for the width.
+      const float len = std::sqrt(1 + kSlant * kSlant), nx = 1 / len, ny = kSlant / len, w = 6.5f;
+      auto col = [&](double r, double g, double b) { return argb(r * glow, g * glow, b * glow); };
+      const u32 hot = col(1.0, 0.95, 0.85), cool = col(1.0, 0.35, 0.10);
+      out.push_back(visible ? 1 : 0);
+      const float px[4] = {tx - nx * w, tx + nx * w, hx + nx * w, hx - nx * w};
+      const float py[4] = {ty - ny * w, ty + ny * w, hy + ny * w, hy - ny * w};
+      const u32 pc[4] = {cool, cool, hot, hot};
+      for (int c = 0; c < 4; ++c) {
+        out.push_back(f32_to_bits(px[c]));
+        out.push_back(f32_to_bits(py[c]));
+        out.push_back(pc[c]);
+      }
+    }
+  }
+  return out;
+}
 }  // namespace lion::rom

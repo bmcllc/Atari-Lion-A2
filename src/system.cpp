@@ -23,7 +23,7 @@ Lion::Lion()
 }
 
 void Lion::power_on() {
-  tuffy.reset(map::kRomBase + Tuffy::kVecReset, Tuffy::kMsrIp | Tuffy::kMsrMe);
+  tuffy.reset(map::kRomVectors + Tuffy::kVecReset, Tuffy::kMsrIp | Tuffy::kMsrMe);
   quacker.running = false;
   tyke.write32(Tyke::kCtrlBase, 0, Master::Dma, nullptr);
 }

@@ -62,7 +62,7 @@ ligam as caches do Tuffy; `HID0[ICFI/DCFI]` e `L2CR[L2I]` as invalidam.
 | `0x1F05_0000` | `0x1F05_00FF` |         | Controles (4 portas)                     |
 | `0x1F06_0000` | `0x1F06_00FF` |         | Drive de CD-ROM                          |
 | `0x1F10_0000` | `0x1F10_3FFF` | 16 KB   | SRAM local do Quacker                    |
-| `0xFFF0_0000` | `0xFFFF_FFFF` | 1 MB    | Boot ROM (reset em `0xFFF0_0100`)        |
+| `0xFF80_0000` | `0xFFFF_FFFF` | 8 MB    | Boot ROM: áudio em `0xFF80_0000`; código, vetores e reset (`0xFFF0_0100`) no último MB |
 
 ## Quacker — controle (`0x1F00_0000`)
 
@@ -222,12 +222,15 @@ Cada instrução leva 1 ciclo; `LDX`/`LDXH` levam +2 ciclos, mais a espera pelo 
 
 ### Firmware de mixagem (padrão)
 
-O firmware lê seus registradores na RAM de dados. Para o host, eles ficam nos mesmos
-endereços da interface anterior:
+O firmware lê seus registradores na RAM de dados (endereços do host = Tyke + 4 × palavra):
 
 | Endereço do host       | Nome       | Descrição                                        |
 | ---------------------- | ---------- | ------------------------------------------------ |
 | `+0x000`               | MASTER_VOL | 0–0x100 (o firmware inicia com 0x100)            |
+| `+0x004`               | BASS       | 0–0x100: até +6 dB abaixo de ~220 Hz             |
+| `+0x008`               | TREBLE     | 0–0x100: até +6 dB acima de ~2 kHz               |
+| `+0x00C`               | ECHO       | 0–0x100: nível de um eco mono de 81 ms com realimentação de 50% |
+| `+0x020`               | SCOPE_POS  | próximo quadro que o firmware grava no scope     |
 | `+0x100 + 0x20 × ch`   | START      | Endereço das amostras PCM16 big-endian           |
 | `+0x104 + 0x20 × ch`   | LENGTH     | Número de amostras                               |
 | `+0x108 + 0x20 × ch`   | LOOP_START | Amostra de retorno do loop                       |
@@ -235,10 +238,11 @@ endereços da interface anterior:
 | `+0x110 + 0x20 × ch`   | VOLUME     | `L << 16 \| R`, 0–0x100 cada                      |
 | `+0x114 + 0x20 × ch`   | CTRL       | bit 0 KEY_ON, bit 1 LOOP, bit 8 confirmação do firmware (toda escrita do host a limpa, então escrever KEY_ON sempre reinicia a amostra) |
 | `+0x118 + 0x20 × ch`   | POSITION   | Amostra atual (escrita pelo firmware)            |
+| `+0x4000`              | SCOPE      | 256 quadros `L, R` da saída já saturada, para visualizadores |
 
-Com os 24 canais ativos, o firmware ocupa cerca de 82% do DSP; a folga cobre as esperas pelo
-barramento quando o Tuffy disputa a SDRAM.
-
+BASS, TREBLE e ECHO começam em zero. O firmware só executa os filtros e o eco quando estão
+ligados. Com os 24 canais ativos e os efeitos desligados, ele ocupa cerca de 83% do DSP; com
+tudo ligado, ainda sobra folga para as esperas pelo barramento.
 
 ## CD-ROM (`0x1F06_0000`)
 
@@ -271,46 +275,104 @@ Cabeçalho big-endian:
 
 ## Boot ROM e dashboard
 
-A ROM é código PowerPC de verdade (gerado por `src/bootrom.cpp`, com fonte, malhas, samples e
-tabelas de animação de `src/rom/assets.cpp`), executado a partir do reset em `0xFFF0_0100`
-com `MSR[IP] = 1`:
+A ROM é código PowerPC de verdade. O código está em `src/bootrom.cpp` e `src/rom/*.cpp`, e
+os dados (fonte, textura da placa, malhas, samples, música e tabelas de animação) estão em
+`src/rom/assets.cpp` e `src/rom/music.cpp`. Ela executa a partir do reset em
+`0xFFF0_0100`, com `MSR[IP] = 1`:
 
-1. carrega o firmware de mixagem na RAM de programa do Tyke, liga o DSP e copia a fonte para
-   a SGRAM;
-2. **intro** (4 s): o emblema do Lion (três barras dentro de um anel com uma juba de raios)
-   entra girando sobre um brilho vermelho, com flash e o jingle de abertura: rugido, acorde
-   de sinos em Lá maior e pad. Start ou A pulam para o fim;
-3. com um disco no drive, dá boot nele; sem disco, abre o **dashboard**;
-4. o loader lê o descritor de volume (setor 16) e o diretório raiz do ISO9660, procura
-   `BOOT.LION;1`, confere o cabeçalho, copia os segmentos, silencia o Tyke, mascara as
-   interrupções e entra no jogo em `entry` com `MSR = ME | FP | VEC` e `r1` no topo da SDRAM.
+1. carrega o firmware de mixagem no Tyke, liga o DSP e copia a fonte e a textura da placa
+   para a SGRAM;
+2. **intro** (6 s), com Start ou A pulando para o fim:
+   - uma placa "JAGUAR" brilha no escuro e treme com o **rugido** do leão;
+   - três **garradas** riscam a placa, com o som das garras, e a rasgam em quatro pedaços
+     que voam e caem;
+   - num flash, o emblema do Lion entra girando: três barras num anel com uma juba de raios;
+   - a **coroa** cai sobre a juba, com sinos;
+   - surgem ATARI LION A2 e o slogan;
+3. espera o drive terminar de olhar o disco:
+   - com um jogo (`BOOT.LION`), dá boot;
+   - com só músicas, abre o dashboard em MUSIC;
+   - sem disco, abre o dashboard;
+4. o **loader** lê o ISO9660, procura `BOOT.LION;1`, confere o cabeçalho e copia os
+   segmentos. Depois silencia as vozes do Tyke, mantendo volume, tom e eco do jogador,
+   mascara as interrupções e entra no jogo em `entry` com `MSR = ME | FP | VEC`.
 
-O dashboard roda a 60 fps em 480p com buffer duplo:
-- **Cena:** céu em degradê, grade de chão rolando em direção à câmera (blend aditivo) e o
-  emblema girando no cabeçalho.
-- **Menu:** três cards com ícones 3D (DISC, AUDIO e SYSTEM). O card escolhido cresce,
-  balança e ganha um brilho pulsante.
-- **Desenho:** tudo sai da Spike por uma FIFO que o Tuffy preenche. O QVE projeta as malhas,
-  com sombreamento plano por face calculado no Tuffy. Entre frames o Tuffy dorme
-  (`MSR[POW]`) e acorda com as interrupções de VBlank e da Spike.
+O **dashboard** roda a 60 fps em 480p com buffer duplo. A cena tem céu em degradê, grade de
+chão rolando (blend aditivo com Gouraud em perspectiva) e o emblema coroado girando no
+cabeçalho. O menu tem cinco cards com ícones 3D; o escolhido cresce, balança e ganha um
+brilho pulsante. Tudo sai da Spike por uma FIFO que o Tuffy preenche. O QVE projeta as
+malhas, e o Tuffy calcula o sombreamento por face e dorme (`MSR[POW]`) entre os frames.
 
-| Item   | A / Start                                                                 |
-| ------ | ------------------------------------------------------------------------- |
-| DISC   | dá boot no disco (fade e tela LOADING com o rótulo do volume)            |
-| AUDIO  | teste de som: toca o jingle e mostra as 24 vozes do Tyke                  |
-| SYSTEM | painel com os chips, a memória e a versão da ROM                          |
+| Card   | A / Start                                                                              |
+| ------ | -------------------------------------------------------------------------------------- |
+| PLAY   | dá boot no jogo do disco (fade e tela LOADING com o rótulo do volume)                  |
+| MUSIC  | player de CD: lista as faixas `.WAV` do disco; A toca ou pausa, X para                 |
+| THEME  | tema sonoro do dashboard: LION A2 THEME (padrão), LION A2 THEME II, PRIDE, NEON SAVANNA, NIGHT PLAINS ou SILENCE |
+| TYKE   | ajustes do Tyke (VOLUME, BASS, TREBLE, ECHO), medidores das 24 vozes, espectro e osciloscópio; A toca o jingle |
+| SYSTEM | painel com os chips, a memória e a versão da ROM                                       |
 
-← e → escolhem; B fecha os painéis. Os efeitos de navegação usam as vozes 21–23 do mixer.
-O drive é acompanhado sem bloquear: ao inserir um disco, o dashboard lê o rótulo do volume
-(`READING DISC...`, depois `PLAY DISC` e o rótulo). Se o disco não tem `BOOT.LION` válido,
-a ROM volta ao dashboard com `THIS DISC CANNOT BE PLAYED`. Uma exceção inesperada mostra uma
-tela vermelha.
+Controles:
+- ← e → escolhem o card; ↑ e ↓ escolhem dentro dos painéis;
+- direções seguradas se repetem;
+- B fecha os painéis.
 
-Estado em SDRAM (`0x00A0_0000`, ver `bootrom.h`): cena, estado do disco, item escolhido,
-painel aberto, rótulo do volume.
+A música toca enquanto se navega, e uma linha `NOW PLAYING` mostra a faixa e o tempo.
+
+**Som.**
+- **Sequenciador:** um sequenciador na ROM escreve registradores do Tyke quadro a quadro.
+  Toca o jingle da intro e os temas sequenciados, que são laços de 8 a 12 s nas vozes 0–15.
+- **Temas gravados:** LION A2 THEME e LION A2 THEME II são as músicas de `Assets/`
+  (2:50 e 1:00), guardadas na ROM em IMA ADPCM estéreo a 22,05 kHz. O Tuffy decodifica um
+  bloco de 1024 quadros por vez no anel de áudio, mantendo meio anel à frente das vozes 16 e
+  17, e volta ao início no fim da música.
+- **Intro:** o rugido e as garras são os sons de `Assets/`, em PCM de 44,1 kHz.
+- **Efeitos de navegação:** usam as vozes 21–23.
+- **Player de CD:** usa as vozes 16 (esquerda) e 17 (direita).
+- **Troca:** ao fim do jingle, entra o tema escolhido. Quando o player toca, o tema para e só
+  volta quando o player para.
+
+**Player de CD.**
+- **Faixas:** arquivos `.WAV` PCM de 16 bits, mono ou estéreo, de 8 a 48 kHz, no diretório
+  raiz. Até 16 faixas, com nomes de até 15 caracteres.
+- **Leitura do disco:** um disco novo é lido em segundo plano. Primeiro o descritor de
+  volume, depois o diretório raiz, onde a ROM procura `BOOT.LION` e as faixas.
+- **Streaming:** cada faixa passa por um anel de 256 KB na SDRAM (`0x00B0_0000`) em duas
+  metades. Enquanto as vozes tocam uma, o drive enche a outra: 128 KB por leitura, através
+  de uma área intermediária onde as amostras little-endian viram big-endian.
+- **Frequência:** o PITCH das vozes ajusta a taxa do arquivo aos 44,1 kHz da saída. No
+  estéreo, cada voz pula uma amostra.
+- **Erros:** um arquivo que não é PCM de 16 bits mostra `UNSUPPORTED .WAV FILE`.
+
+**Visualizadores.**
+- **Fonte:** o buffer SCOPE do firmware, com os últimos 256 quadros da saída.
+- **Espectro:** 16 bandas de 120 Hz a 12 kHz, calculadas pelo Tuffy com filtros de Goertzel
+  e janela de Hann, com nível logarítmico e queda suave.
+- **Osciloscópio:** disparado na subida do sinal.
+
+**Disco.**
+- **Leitura:** o drive é acompanhado sem bloquear (`READING DISC...`, depois o rótulo).
+- **Disco sem jogo:** mostra `NO GAME ON THIS DISC`.
+- **Jogo com defeito:** se o `BOOT.LION` existe mas não carrega, a ROM volta ao dashboard e
+  o marca como `THIS DISC CANNOT BE PLAYED` até trocar o disco. As músicas do disco
+  continuam tocáveis.
+- **Exceção inesperada:** mostra uma tela vermelha.
+
+**Assets de áudio.** Os originais ficam em `Assets/` e não entram no build:
+- `sfx_intro.mp3`: o rugido;
+- `sfx_intro_2.mp3`: as garras;
+- `dashboard_theme.ogg` e `dashboard_theme_2.ogg`: os temas gravados.
+
+`tools/convert_assets.sh` converte esses arquivos com o ffmpeg e a ferramenta `lionasset` para
+`Assets/rom/`, que entra no binário via `.incbin` (`src/rom/blobs.cpp`). O formato LADP está
+descrito em `tools/ima_adpcm.h`.
+
+Estado em SDRAM (`0x00A0_0000`, ver `bootrom.h`):
+- cena, estado do disco, rótulo, jogo e faixas;
+- card e painel abertos, tema;
+- estado e tempo do player.
 
 Com `PIC.STRAPS` bit 0 (unidade de desenvolvimento, opção `--fast-boot`), não há intro: com
-disco, o boot é imediato; sem disco, o dashboard abre direto.
+disco, o loader roda na hora; sem disco, o dashboard abre direto.
 
 **Boot de desenvolvimento** (imagens `.lion` sem disco): o emulador copia os segmentos direto
 na memória e carrega o firmware do Tyke, como um kit de desenvolvimento. O Tuffy começa em `entry` com
@@ -373,5 +435,5 @@ As codificações seguem a tabela de opcodes do GNU binutils (`m88k-opcode.h`, e
   esperas pelo barramento são compensadas nas fatias seguintes. No árbitro da SDRAM o Tyke tem
   prioridade de tempo real: espera no máximo a transferência em andamento e passa à frente da fila.
 - **CD-ROM:** drive 12× com busca, DMA e interrupção.
-- **Boot ROM:** intro, dashboard e loader em código PowerPC.
+- **Boot ROM:** intro, dashboard (com player de CD, temas, ajustes do Tyke e visualizadores) e loader em código PowerPC.
 - **Barramento:** disputa pela SDRAM entre os mestres, com prioridade de tempo real para o Tyke.

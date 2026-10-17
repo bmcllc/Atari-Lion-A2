@@ -21,7 +21,10 @@ constexpr u32 kPic = 0x1F04'0000;
 constexpr u32 kPad = 0x1F05'0000;
 constexpr u32 kCd = 0x1F06'0000;
 constexpr u32 kSramBase = 0x1F10'0000, kSramSize = 16u << 10;
-constexpr u32 kRomBase = 0xFFF0'0000, kRomSize = 1u << 20;
+// 8 MB boot ROM ending at the top of the address space. The PowerPC vectors
+// (MSR[IP] = 1) sit at 0xFFF0_0000, in its last megabyte; below them, audio data.
+constexpr u32 kRomBase = 0xFF80'0000, kRomSize = 8u << 20;
+constexpr u32 kRomVectors = 0xFFF0'0000;
 }  // namespace map
 
 enum class Master { Tuffy, Quacker, Dma };

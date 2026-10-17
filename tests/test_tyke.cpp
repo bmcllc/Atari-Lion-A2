@@ -1,3 +1,5 @@
+#include <cmath>
+
 #include "test.h"
 #include "tyke/firmware.h"
 #include "tykeasm.h"
@@ -125,4 +127,84 @@ TEST(tyke_clock_absorbs_bus_stalls) {
     CHECK(busy_until <= now + 1000);  // within a few µs of real time
   }
   CHECK(sys.bus.contention[size_t(lion::Master::Dma)] > 0);  // the voices did wait for the bus
+}
+
+namespace {
+// One voice playing a looped square wave of the given period (in samples).
+void square_voice(Lion& sys, u32 period) {
+  for (u32 i = 0; i < 1024; ++i) store_be16(sys.bus.host_ptr(0x9000 + i * 2), u16((i % period) < period / 2 ? 8000 : -8000));
+  sys.tyke.load_program(lion::tyke_mixer_firmware());
+  sys.tyke.run(100);  // past the firmware's start-up, which resets the effects
+  channel(sys, 0, 0x9000, 1024 / period * period, 0, 0x10000, 0x0100'0100, 3);
+}
+double rms(const std::vector<s16>& v, size_t from) {
+  double acc = 0;
+  for (size_t i = from; i < v.size(); i += 2) acc += double(v[i]) * v[i];
+  return std::sqrt(acc / double((v.size() - from) / 2));
+}
+}  // namespace
+
+TEST(tyke_scope_holds_last_output) {
+  Lion sys;
+  square_voice(sys, 64);
+  sys.tyke.run(Tyke::kHz / 20);
+  std::vector<s16> out;
+  sys.tyke.drain(out);
+  const u32 pos = sys.tyke.data(lion::kScopePos);
+  // The frame just before the write position is the last one sent to the DAC.
+  const u32 last = (pos + lion::kScopeFrames - 1) % lion::kScopeFrames;
+  CHECK_EQ(s16(sys.tyke.data(lion::kScopeBase + 2 * last)), out[out.size() - 2]);
+  CHECK_EQ(s16(sys.tyke.data(lion::kScopeBase + 2 * last + 1)), out.back());
+}
+
+TEST(tyke_bass_and_treble) {
+  // Bass lifts a low square wave; treble lifts a high one; neither touches the other much.
+  auto level = [](u32 period, u32 bass, u32 treble) {
+    Lion sys;
+    square_voice(sys, period);
+    reg(sys, lion::kMixBass, bass);
+    reg(sys, lion::kMixTreble, treble);
+    sys.tyke.run(Tyke::kHz / 10);
+    std::vector<s16> out;
+    sys.tyke.drain(out);
+    return rms(out, out.size() / 2);
+  };
+  const double low = level(512, 0, 0), high = level(8, 0, 0);
+  CHECK(level(512, 0x100, 0) > low * 1.3);
+  CHECK(level(8, 0, 0x100) > high * 1.3);
+  CHECK(level(8, 0x100, 0) < high * 1.15);
+}
+
+TEST(tyke_echo_repeats_after_delay) {
+  Lion sys;
+  for (u32 i = 0; i < 64; ++i) store_be16(sys.bus.host_ptr(0x9000 + i * 2), u16(i < 32 ? 10000 : 0));
+  sys.tyke.load_program(lion::tyke_mixer_firmware());
+  sys.tyke.run(100);
+  reg(sys, lion::kMixEcho, 0x100);
+  channel(sys, 0, 0x9000, 64, 0, 0x10000, 0x0100'0100, 1);  // one short burst
+  sys.tyke.run(Tyke::kHz / 5);
+  std::vector<s16> out;
+  sys.tyke.drain(out);
+  // Silence after the burst, then its echo one delay line later.
+  auto at = [&](size_t frame) { return out[frame * 2]; };
+  size_t start = 0;
+  while (start < out.size() / 2 && at(start) == 0) ++start;
+  CHECK(at(start + 200) == 0);
+  CHECK(at(start + lion::kEchoWords + 2) > 1000);
+}
+
+TEST(tyke_effects_fit_with_24_voices) {
+  Lion sys;
+  for (int i = 0; i < 1024; ++i) store_be16(sys.bus.host_ptr(0x9000 + u32(i) * 2), u16(i));
+  sys.tyke.load_program(lion::tyke_mixer_firmware());
+  sys.tyke.run(100);
+  reg(sys, lion::kMixBass, 0x80);
+  reg(sys, lion::kMixTreble, 0x80);
+  reg(sys, lion::kMixEcho, 0x80);
+  for (int ch = 0; ch < 24; ++ch) channel(sys, ch, 0x9000, 1024, 0, 0x10000, 0x0008'0008, 3);
+  sys.tyke.run(Tyke::kHz / 10);
+  std::vector<s16> out;
+  sys.tyke.drain(out);
+  CHECK(out.size() / 2 >= 4405);
+  CHECK(sys.tyke.idle_cycles > sys.tyke.total_cycles / 12);  // still some headroom
 }
