@@ -35,6 +35,10 @@ sub("Src/UnProp.cpp", 'char *Temp = ((*(DWORD *)PropertyValue) & BitMask) ? "Tru
 sub("Inc/UnVcWin32.h", "#define __INTEL__\t1\n", "")
 
 sub("Src/UnFile.cpp", "CORE_API INT DOUBLE appFloor( FLOAT Value )", "CORE_API INT appFloor( FLOAT Value )")
+# Tagged allocations feed the memory report (lionrt.cpp).
+sub("Src/UnFile.cpp", "\tvoid* Ptr = malloc( Size );", "\tvoid* Ptr = lion_malloc_tag( Size, Tag );")
+sub("Src/UnFile.cpp", "\treturn realloc( Ptr, NewSize );\n#endif", "\treturn lion_realloc_tag( Ptr, NewSize, Tag );\n#endif")
+sub("Src/UnFile.cpp", "CORE_API void* appMalloc( INT Size, const char* Tag )", 'extern "C" void* lion_malloc_tag( unsigned long, const char* );\nextern "C" void* lion_realloc_tag( void*, unsigned long, const char* );\nCORE_API void* appMalloc( INT Size, const char* Tag )')
 
 # Debugging aid: say which object holds a bad reference when the garbage collector trips.
 sub("Src/UnObj.cpp", "\t\tif( Obj )\n\t\t\tcheck(Obj->IsValid());", "\t\tif( Obj && !Obj->IsValid() )\n\t\t\tdebugf( \"GC: invalid reference %p from %s\", Obj, Context ? Context->GetFullName() : \"the root\" );\n\t\tif( Obj )\n\t\t\tcheck(Obj->IsValid());")

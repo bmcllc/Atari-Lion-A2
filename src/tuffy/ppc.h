@@ -81,6 +81,7 @@ class Tuffy {
   bool strict_7400 = false;
   // Count of illegal/unimplemented opcodes hit (for diagnostics).
   u32 illegal_count = 0;
+  u32 first_illegal_pc = 0, first_illegal_lr = 0, first_illegal_sp = 0;  // debugging aid
 
  private:
   void execute(u32 op);

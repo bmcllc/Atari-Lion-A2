@@ -150,17 +150,32 @@ docs/           referência de hardware
 
 O **motor do Unreal 1** do repositório [RedPandaProjects/UnrealEngine](https://github.com/RedPandaProjects/UnrealEngine)
 é compilado com clang para o Tuffy e roda dentro do emulador: Core (objetos, nomes, pacotes), Engine (níveis,
-atores, física, `UGameEngine`), a máquina virtual do UnrealScript (as classes de `Engine.u` rodam de verdade) e o
-renderizador do BSP (pacote Render). Um pacote novo, `LionDrv`, faz o papel do `WinDrv`/`SoftDrv`: o cliente e o
-viewport, o dispositivo de render (`ULionRenderDevice`) que desenha pela Spike com Z-buffer, mipmaps e color key, e a
-entrada pelo controle. O áudio é o `NullAudioSubsystem`.
+atores, física, `UGameEngine`), a máquina virtual do UnrealScript (as classes de `Engine.u` e `UNreal.u` rodam de
+verdade) e o renderizador do BSP (pacote Render). Um pacote novo, `LionDrv`, faz o papel do `WinDrv`/`SoftDrv`/
+`Galaxy`: o cliente e o viewport, o dispositivo de render (`ULionRenderDevice`), que desenha pela Spike com
+Z-buffer, mipmaps, color key e **lightmaps** (cada polígono é cortado em triângulos de poucos texels e cada canto
+amostra o lightmap que o Render calcula), a entrada pelo controle e o **áudio no Tyke** (`ULionAudioSubsystem`).
 
-Estado: o motor sobe, o jogo `UNreal.SinglePlayer` (do pacote `UNreal.u`, lido do CD sob demanda) carrega em cerca de
-90 s de tempo emulado, o jogador `MaleOne` nasce no `Entry.unr` com o HUD e a arma do Unreal, e o jogo roda a 60 Hz
-com colisão e entrada pelo controle. Como o repositório não traz mapas, a sala é povoada por código
-(`engine/lionboot.cpp`: um Krall, um Brute, vida e armas do `UNreal.u`). A tela mostra uma barra de carregamento
-vermelha enquanto o jogo é lido do CD. Ainda faltam lightmaps, áudio, e um mapa de verdade (o repositório só traz o
-`Entry.unr`, uma sala cúbica); sem os mapas originais não há o jogo completo.
+Como o repositório não traz mapas (só o `Entry.unr`, uma sala cúbica), a **fase é construída no próprio console** na
+inicialização, com o código de edição do Unreal compilado para o Tuffy (CSG, construtor de BSP, visibilidade e
+iluminação de `Editor/`): `editor/LionMap.cpp` escava sete salas e corredores de um mundo sólido com caixas, textura
+as paredes com texturas procedurais (o repositório não tem texturas de parede), põe luzes estáticas, calcula as
+sombras por raios e povoa o mapa com monstros e itens do `UNreal.u`.
+
+Estado: o jogo `UNreal.SinglePlayer` carrega do CD em cerca de 80 s de tempo emulado, o jogador `MaleOne` nasce no mapa
+com o HUD e as armas do Unreal, e o jogo roda a 60 Hz com colisão, luz, som, combate com os monstros e entrada
+pelo controle. A tela mostra uma barra de carregamento vermelha enquanto o jogo é lido do CD. O jogo não está
+completo: são sete salas e não as fases originais (que não estão no repositório), sem música e sem as sequências do
+jogo original.
+
+Áudio: o firmware de mixagem do Tyke (24 vozes PCM16) toca os sons. Os sons ficam no CD (11 MB no `UNreal.u`): o
+motor só registra onde cada onda está no arquivo, e a primeira vez que um som toca ele é lido do CD, convertido para
+PCM16 mono e guardado num cache de 1 MB. Há atenuação por distância, pan estéreo e sons ambiente em loop.
+
+Memória e tempo: o heap tem 22 MB dos 24 MB (o jogo usa cerca de 19 MB); o `Engine.u` e o `Editor.u` vêm do CD, que tem
+um cache de blocos compartilhado. Quando o heap aperta, o jogo coleta lixo e esvazia o cache de áudio. O relógio do
+jogo é o contador de quadros do vídeo: cada tick avança o mundo pelos quadros de 60 Hz que passaram (de 1 a 6) e
+espera o próximo vblank quando termina cedo.
 
 Como funciona (`tools/unrport/`):
 - `core/build_core.sh` e `engine/build_engine.sh` copiam Core e Engine do checkout e aplicam `patch_core.py` /
@@ -170,7 +185,9 @@ Como funciona (`tools/unrport/`):
   tamanhos do UnrealScript;
 - `core/lionrt.cpp`: libc mínima, heap, arquivos do RAM disc, ABI de exceções (um `throw` trava);
 - `core/lionplat.cpp`: substitui o `UnPlat.cpp` do Windows (log, config por `.ini`, tabela de classes nativas);
-- `engine/lionboot.cpp`: o `InitEngine()`/`MainLoop()` do Windows; `liondrv/`: o pacote LionDrv;
+- `engine/lionboot.cpp`: o `InitEngine()`/`MainLoop()` do Windows; `liondrv/`: o pacote LionDrv (render, entrada, áudio);
+- `editor/`: `patch_editor.py` e a cola mínima do `UEditorEngine` (`LionEditor.cpp`) para compilar o CSG/BSP/iluminação
+  do Editor, e o construtor de mapa (`LionMap.cpp`);
 - `unrport.cpp` (no host) empacota o disco: o mapa, `Core.u`, `Engine.u`, `Lion.ini` e as localizações.
 
 ```bash
@@ -185,6 +202,7 @@ UNREAL_SRC=/caminho/para/UnrealEngine tools/unrport/build.sh $UNREAL_SRC/Engine/
 ./build/lion --fast-boot --scale 3 build/unreal.iso
 ```
 
-O log do motor fica na RAM em `0x00380000` (`./build/lion --headless --frames 1200 --dump-ram log.bin,380000,10000
-disco.iso`; os 4 primeiros bytes são o tamanho). Uma tela vermelha indica erro fatal; `--dump` grava o último quadro
-e o fim da execução mostra PC/LR do Tuffy. O carregamento do motor leva alguns segundos de tempo emulado.
+O log do motor fica na RAM em `0x001F0000` (`./build/lion --headless --frames 1200 --dump-ram log.bin,1F0000,20000
+disco.iso`; os 4 primeiros bytes são o tamanho). `--until-log "texto|outro"` encerra a execução headless assim que o log
+contém um dos textos (ou o Tuffy executa um opcode ilegal). Uma tela vermelha indica erro fatal; `--dump` grava o último quadro
+e o fim da execução mostra PC/LR do Tuffy. 

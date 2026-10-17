@@ -49,3 +49,50 @@ extern "C" void lion_engine_test() {
   debugf("engine test: %s, %i bytes of properties, super %s", C->GetName(), C->GetPropertiesSize(), C->GetSuperClass() ? C->GetSuperClass()->GetName() : "none");
   debugf("engine test: sizeof(AActor)=%i", (INT)sizeof(AActor));
 }
+
+// Memory census (a debugging aid): where the object heap goes, by kind.
+extern "C" void lion_tag_report();
+extern "C" void lion_census(const char* Tag) {
+  INT Tex = 0, TexBytes = 0, Meshes = 0, MeshBytes = 0, Funcs = 0, ScriptBytes = 0, Total = 0, Others = 0;
+  for (FObjectIterator It; It; ++It) {
+    UObject* O = *It;
+    ++Total;
+    if (O->IsA(UTexture::StaticClass)) {
+      UTexture* T = (UTexture*)O;
+      ++Tex;
+      for (INT i = 0; i < T->Mips.Num(); ++i) TexBytes += T->Mips(i).DataArray.Num();
+    } else if (O->IsA(UMesh::StaticClass)) {
+      UMesh* M = (UMesh*)O;
+      ++Meshes;
+      MeshBytes += M->Verts.Num() * sizeof(FMeshVert) + M->Tris.Num() * sizeof(FMeshTri) + M->VertLinks.Num() * 4 +
+                   M->Connects.Num() * sizeof(FMeshVertConnect) + M->AnimSeqs.Num() * sizeof(FMeshAnimSeq);
+    } else if (O->IsA(UStruct::StaticClass)) {
+      ++Funcs;
+      ScriptBytes += ((UStruct*)O)->Script.Num();
+    } else {
+      ++Others;
+    }
+  }
+  debugf("census %s: %i objects; %i textures %i KB; %i meshes %i KB; %i structs/classes script %i KB; %i others",
+         Tag, Total, Tex, TexBytes >> 10, Meshes, MeshBytes >> 10, Funcs, ScriptBytes >> 10, Others);
+  // Instance sizes by class.
+  static const char* Names[40];
+  static INT Count[40], Bytes[40];
+  INT N = 0;
+  for (FObjectIterator It; It; ++It) {
+    const char* Name = It->GetClass()->GetName();
+    INT k = 0;
+    for (; k < N; ++k) if (Names[k] == Name || !appStrcmp(Names[k], Name)) break;
+    if (k == N) { if (N == 40) continue; Names[N++] = Name; Count[k] = Bytes[k] = 0; }
+    ++Count[k];
+    Bytes[k] += It->GetClass()->GetPropertiesSize();
+  }
+  for (INT r = 0; r < 8; ++r) {
+    INT Best = -1;
+    for (INT k = 0; k < N; ++k) if (Bytes[k] > 0 && (Best < 0 || Bytes[k] > Bytes[Best])) Best = k;
+    if (Best < 0) break;
+    debugf("census class %s: %i objects, %i KB instances", Names[Best], Count[Best], Bytes[Best] >> 10);
+    Bytes[Best] = 0;
+  }
+  lion_tag_report();
+}

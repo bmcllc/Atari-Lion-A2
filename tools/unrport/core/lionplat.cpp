@@ -67,7 +67,7 @@ CORE_API void ClipboardCopy(const char*) {}
 struct LionExport { const char* name; void* addr; };
 extern "C" __attribute__((weak)) LionExport g_lion_exports[] = {{0, 0}};
 CORE_API void* appGetDllHandle(const char* Name) {
-  static const char* Native[] = {"Core", "Engine", "Render", "LionDrv", "SoundDrv", "Fire", "IpDrv"};
+  static const char* Native[] = {"Core", "Engine", "Render", "LionDrv", "SoundDrv", "Fire", "IpDrv", "Editor"};
   for (INT i = 0; i < ARRAY_COUNT(Native); ++i)
     if (!appStricmp(Name, Native[i])) return (void*)1;
   return 0;

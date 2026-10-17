@@ -234,6 +234,85 @@ void ULionRenderDevice::ClearZ(FSceneNode*) {
   Put(0xFFFFFF);
 }
 
+// Surfaces are lit from the engine's lightmap: a texel grid over the surface (one texel per UScale world units,
+// 7 bits per channel, 127 = the texture at full brightness). The Spike modulates per vertex, so polygons are cut
+// into triangles that are no longer than a few texels and each corner samples the lightmap.
+struct FLitVertex {
+  FVector P;       // camera space
+  FLOAT U, V;      // texture-plane coordinates (texels from the surface base)
+  FLOAT R, G, B;   // light
+};
+
+struct FSurfaceDraw {
+  FSceneNode* Frame;
+  const FSurfaceFacet* Facet;
+  FLionTex* Tex;
+  const FTextureInfo* Light;
+  FLOAT UDot, VDot, PanX, PanY;
+  DWORD Flat;
+};
+
+static void SampleLight(const FTextureInfo* L, FLOAT U, FLOAT V, FLOAT* Out) {
+  FLOAT X = (U - L->Pan.X) / L->UScale, Y = (V - L->Pan.Y) / L->VScale;
+  X = X < 0 ? 0 : X > L->UClamp - 1 ? L->UClamp - 1 : X;
+  Y = Y < 0 ? 0 : Y > L->VClamp - 1 ? L->VClamp - 1 : Y;
+  const INT X0 = (INT)X, Y0 = (INT)Y;
+  const INT X1 = X0 + 1 < L->UClamp ? X0 + 1 : X0, Y1 = Y0 + 1 < L->VClamp ? Y0 + 1 : Y0;
+  const FLOAT FX = X - X0, FY = Y - Y0;
+  const FColor* Data = (const FColor*)L->Mips[0]->DataPtr;
+  const FColor* T00 = &Data[Y0 * L->USize + X0];
+  const FColor* T10 = &Data[Y0 * L->USize + X1];
+  const FColor* T01 = &Data[Y1 * L->USize + X0];
+  const FColor* T11 = &Data[Y1 * L->USize + X1];
+  const FLOAT W00 = (1 - FX) * (1 - FY), W10 = FX * (1 - FY), W01 = (1 - FX) * FY, W11 = FX * FY;
+  const FLOAT K = 1.7f / 127.0f;  // a little overbright: the Spike cannot brighten past the texture
+  Out[0] = (T00->R * W00 + T10->R * W10 + T01->R * W01 + T11->R * W11) * K;
+  Out[1] = (T00->G * W00 + T10->G * W10 + T01->G * W01 + T11->G * W11) * K;
+  Out[2] = (T00->B * W00 + T10->B * W10 + T01->B * W01 + T11->B * W11) * K;
+}
+
+static void MakeLit(const FSurfaceDraw& D, FLitVertex& V) {
+  V.U = (D.Facet->MapCoords.XAxis | V.P) - D.UDot;
+  V.V = (D.Facet->MapCoords.YAxis | V.P) - D.VDot;
+  FLOAT C[3];
+  SampleLight(D.Light, V.U, V.V, C);
+  V.R = C[0]; V.G = C[1]; V.B = C[2];
+}
+
+static void EmitLit(const FSurfaceDraw& D, const FLitVertex& V0, const FLitVertex& V1, const FLitVertex& V2, INT Level) {
+  // Split the longest edge while it spans more than ~3 texels.
+  const FLitVertex* P[3] = {&V0, &V1, &V2};
+  INT Longest = 0;
+  FLOAT MaxEdge = 0;
+  for (INT e = 0; e < 3; ++e) {
+    const FLitVertex &A = *P[e], &B = *P[(e + 1) % 3];
+    const FLOAT L = Max(Abs(A.U - B.U), Abs(A.V - B.V));
+    if (L > MaxEdge) { MaxEdge = L; Longest = e; }
+  }
+  if (MaxEdge > 3.0f * D.Light->UScale && Level < 6) {
+    const FLitVertex &A = *P[Longest], &B = *P[(Longest + 1) % 3], &C = *P[(Longest + 2) % 3];
+    FLitVertex M;
+    M.P = (A.P + B.P) * 0.5f;
+    MakeLit(D, M);
+    EmitLit(D, A, M, C, Level + 1);
+    EmitLit(D, M, B, C, Level + 1);
+    return;
+  }
+  FLionVertex Out[3];
+  for (INT i = 0; i < 3; ++i) {
+    const FLitVertex& L = *P[i];
+    const FLOAT Rz = D.Frame->Proj.Z / L.P.Z;
+    Out[i].X = L.P.X * Rz + D.Frame->FX15;
+    Out[i].Y = L.P.Y * Rz + D.Frame->FY15;
+    Out[i].Z = Depth(L.P.Z);
+    Out[i].RW = 1.0f / L.P.Z;
+    Out[i].Argb = PackColor(L.R, L.G, L.B, 1.0f);
+    Out[i].U = D.Tex ? (L.U - D.PanX) * D.Tex->InvW : 0;
+    Out[i].V = D.Tex ? (L.V - D.PanY) * D.Tex->InvH : 0;
+  }
+  EmitTri(Out[0], Out[1], Out[2]);
+}
+
 void ULionRenderDevice::DrawComplexSurface(FSceneNode* Frame, FSurfaceInfo& Surface, FSurfaceFacet& Facet) {
   if (Surface.PolyFlags & PF_Invisible) return;
   FLionTex* Tex = Surface.Texture ? FindTexture(*Surface.Texture, (Surface.PolyFlags & PF_Masked) != 0) : NULL;
@@ -243,10 +322,21 @@ void ULionRenderDevice::DrawComplexSurface(FSceneNode* Frame, FSurfaceInfo& Surf
   const FLOAT VDot = Facet.MapCoords.YAxis | Facet.MapCoords.Origin;
   const FLOAT PanX = Surface.Texture ? Surface.Texture->Pan.X : 0, PanY = Surface.Texture ? Surface.Texture->Pan.Y : 0;
   const DWORD Argb = (Surface.PolyFlags & PF_Unlit) ? 0xFFFFFFFF : 0xFFC8C8C8;
+  const UBOOL Lit = !(Surface.PolyFlags & PF_Unlit) && Surface.LightMap && Surface.LightMap->Mips[0] && Surface.LightMap->Mips[0]->DataPtr;
+  FSurfaceDraw D = {Frame, &Facet, Tex, Surface.LightMap, UDot, VDot, PanX, PanY, Argb};
   for (FSavedPoly* Poly = Facet.Polys; Poly; Poly = Poly->Next) {
     if (Poly->NumPts < 3) continue;
-    FLionVertex V[32];
     const INT N = Poly->NumPts < 32 ? Poly->NumPts : 32;
+    if (Lit) {
+      FLitVertex V[32];
+      for (INT i = 0; i < N; ++i) {
+        V[i].P = Poly->Pts[i]->Point;
+        MakeLit(D, V[i]);
+      }
+      for (INT i = 1; i + 1 < N; ++i) EmitLit(D, V[0], V[i], V[i + 1], 0);
+      continue;
+    }
+    FLionVertex V[32];
     for (INT i = 0; i < N; ++i) {
       const FTransform* P = Poly->Pts[i];
       V[i].X = P->ScreenX;

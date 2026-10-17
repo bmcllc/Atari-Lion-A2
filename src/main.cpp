@@ -27,6 +27,7 @@ struct Options {
   std::string dump_ram;  // file,hexaddr,hexlen
   std::vector<std::pair<long, u32>> holds;  // --hold FRAME:HEXMASK[:LX:LY]: controller state from that frame on
   std::vector<std::array<u8, 2>> hold_sticks;
+  std::string until_log;  // --until-log A|B: headless run ends when the guest log contains A or B
   bool headless = false;
   int scale = 2;
   bool fast_boot = false;
@@ -36,7 +37,7 @@ void usage() {
   std::fprintf(stderr,
                "usage: lion [image.lion | disc.iso] [--frames N] [--dump out.ppm] [--dump-ram file,addr,len] [--hold frame:mask[:lx:ly]] [--headless]\n"
                "            [--verbose] [--trace-tuffy] [--trace-quacker] [--scale N] [--strict-7400]\n"
-               "            [--fast-boot]\n"
+               "            [--fast-boot] [--until-log TEXT|TEXT]\n"
                "With no image, the console starts its dashboard with an empty CD drive.\n"
                "--fast-boot straps the board as a development unit: no intro, discs boot at once.\n");
 }
@@ -114,6 +115,27 @@ int run_headless(lion::Lion& sys, const Options& opt) {
       }
     sys.run_frame();
     sys.audio.clear();
+    if (!opt.until_log.empty() && sys.tuffy.illegal_count > 0) {  // a guest crash ends the run too
+      std::printf("until-log: Tuffy fault after %ld frames: first illegal opcode at PC=%08X LR=%08X SP=%08X\n", i + 1,
+                  sys.tuffy.first_illegal_pc, sys.tuffy.first_illegal_lr, sys.tuffy.first_illegal_sp);
+      break;
+    }
+    // --until-log: stop once the guest's log ring (0x1F0000, see tools/unrport) contains the text.
+    if (!opt.until_log.empty() && i % 30 == 29)
+      if (const u8* p = sys.bus.host_range(0x1F0000, 0x20000)) {
+        const std::string log(reinterpret_cast<const char*>(p) + 4, 0x20000 - 4);
+        bool hit = false;
+        for (size_t at = 0; at <= opt.until_log.size() && !hit;) {
+          size_t bar = opt.until_log.find('|', at);
+          if (bar == std::string::npos) bar = opt.until_log.size();
+          hit = bar > at && log.find(opt.until_log.substr(at, bar - at)) != std::string::npos;
+          at = bar + 1;
+        }
+        if (hit) {
+          std::printf("until-log: found after %ld frames\n", i + 1);
+          break;
+        }
+      }
   }
   const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   std::printf("%ld frames in %.2fs (%.0f%% of real time)\n", frames, secs,
@@ -175,6 +197,7 @@ int main(int argc, char** argv) {
       opt.hold_sticks.push_back({u8(lx), u8(ly)});
       opt.headless = true;
     }
+    else if (a == "--until-log") opt.until_log = next(), opt.headless = true;
     else if (a == "--headless") opt.headless = true;
     else if (a == "--verbose") lion::g_verbose = true;
     else if (a == "--scale") opt.scale = std::max(1, std::atoi(next()));

@@ -99,7 +99,7 @@ void Tuffy::exception(u32 vector, u32 srr1_bits, u32 return_pc) {
 
 void Tuffy::illegal(u32 op) {
   if (illegal_count < 16) LION_WARN("Tuffy: illegal opcode %08X @%08X", op, pc);
-  ++illegal_count;
+  if (illegal_count++ == 0) first_illegal_pc = pc, first_illegal_lr = lr, first_illegal_sp = gpr[1];
   program(kProgIllegal);
 }
 

@@ -27,6 +27,13 @@ if [[ ! -d "$sound/Src" ]]; then  # the null audio device, minus its Windows inc
   mkdir -p "$sound/Src" "$sound/Inc"
   grep -v -e '#include <windows.h>' -e '#include <mmsystem.h>' "$src/Source/SoundDrv/Null.cpp" > "$sound/Src/Null.cpp"
 fi
+editor="$cache-editor"
+if [[ ! -d "$editor/Src" ]]; then  # CSG, BSP builder, visibility and lighting of the level editor, to build maps on the device
+  mkdir -p "$editor/Src" "$editor/Inc"
+  for f in UnBsp UnEdCsg UnVisi UnShadow UnTopics Editor UnEdTran; do cp "$src/Source/Editor/Src/$f.cpp" "$editor/Src/"; done
+  cp "$src/Source/Editor/Src/"*.h "$src/Source/Editor/Inc/"* "$src/Source/Render/Inc/"*.h "$editor/Inc/"
+  python3 -I "$here/editor/patch_editor.py" "$editor"
+fi
 mkdir -p "$lion/Src" "$lion/Inc"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -36,12 +43,13 @@ incs="$engine/Inc:$cache/Inc:$cache/Src"
 "$here/engine/compile_pkg.sh" Render "$render" "$incs"
 "$here/engine/compile_pkg.sh" SoundDrv "$sound" "$incs"
 "$here/engine/compile_pkg.sh" Fire "$fire" "$incs"
-"$here/engine/compile_pkg.sh" LionDrv "$lion" "$incs:$here/liondrv" "$here/liondrv/LionDrv.cpp" "$here/liondrv/LionRenDev.cpp"
+"$here/engine/compile_pkg.sh" Editor "$editor" "$incs:$render/Inc" "$here/editor/LionEditor.cpp" "$here/editor/LionMap.cpp"
+"$here/engine/compile_pkg.sh" LionDrv "$lion" "$incs:$here/liondrv" "$here/liondrv/LionDrv.cpp" "$here/liondrv/LionRenDev.cpp" "$here/liondrv/LionAudio.cpp"
 clang --target=powerpc-unknown-none-elf -c "$here/crt0.S" -o "$tmp/crt0.o"
 
 link() {
   ld.lld -m elf32ppc -T "$here/link.ld" -nostdlib "$tmp/crt0.o" "$@" --whole-archive "$cache/libcore.a" \
-      "$engine/libengine.a" "$render/libRender.a" "$fire/libFire.a" "$sound/libSoundDrv.a" "$lion/libLionDrv.a" --no-whole-archive -o "$tmp/client.elf"
+      "$engine/libengine.a" "$render/libRender.a" "$fire/libFire.a" "$sound/libSoundDrv.a" "$editor/libEditor.a" "$lion/libLionDrv.a" --no-whole-archive -o "$tmp/client.elf"
 }
 # Native class objects are found by name (UPackage::GetDllExport): link once, collect the autoclass* symbols,
 # generate the export table and link again.
@@ -66,6 +74,6 @@ llvm-objcopy -O binary "$tmp/client.elf" "$tmp/client.bin"
 
 scripts="$src/Unreal/Scripts"
 "${UNRPORT:-build/unrport}" "$map" "$tmp/client.bin" "$out" "${@:3}" \
-    --file "$here/Lion.ini" --file "$scripts/Core.u" --file "$scripts/Engine.u" --file "$scripts/Fire.u" --file "$scripts/IpDrv.u" \
+    --file "$here/Lion.ini" --file "$scripts/Core.u" --file "$scripts/Fire.u" --file "$scripts/IpDrv.u" \
     --file "$src/Engine/Localization/Core.int" --file "$src/Engine/Localization/Engine.int" \
-    --cdfile "$scripts/UNreal.u"  # the game (37 MB: scripts, meshes, textures, sounds), streamed from the CD
+    --cdfile "$scripts/Engine.u" --cdfile "$scripts/Editor.u" --cdfile "$scripts/UNreal.u"  # the game (37 MB: scripts, meshes, textures, sounds), streamed from the CD

@@ -76,3 +76,24 @@ class LIONDRV_API ULionRenderDevice : public URenderDevice {
   void GetStats(char* Result) { Result[0] = 0; }
   void ReadPixels(FColor*) {}
 };
+
+// Audio on the Tyke DSP: its mixing firmware plays up to 24 PCM16 voices from RAM. Sounds stay on the disc
+// (the game package holds 11 MB of them) and are decoded into a small cache the first time they play.
+class LIONDRV_API ULionAudioSubsystem : public UAudioSubsystem {
+  DECLARE_CLASS_WITHOUT_CONSTRUCT(ULionAudioSubsystem, UAudioSubsystem, CLASS_Config)
+  ULionAudioSubsystem();
+  UBOOL Init();
+  void SetViewport(UViewport* Viewport);
+  UBOOL Exec(const char* Cmd, FOutputDevice* Out = GSystem);
+  void Update(FPointRegion Region, FCoords& Listener);
+  void RegisterMusic(UMusic*) {}
+  void RegisterSound(USound* Sound);
+  void UnregisterSound(USound* Sound);
+  void UnregisterMusic(UMusic*) {}
+  UBOOL PlaySound(AActor* Actor, INT Id, USound* Sound, FVector Location, FLOAT Volume, FLOAT Radius, FLOAT Pitch);
+  void NoteDestroy(AActor* Actor);
+  UBOOL GetLowQualitySetting() { return 1; }
+
+  UViewport* Viewport;
+  INT Ticks;
+};

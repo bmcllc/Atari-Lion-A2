@@ -376,8 +376,8 @@ int main(int argc, char** argv) {
     ramdisc.insert(ramdisc.end(), f.data.begin(), f.data.end());
     while (ramdisc.size() % 4) ramdisc.push_back(0);
   }
-  if (ramdisc.size() > 0x200000) {
-    std::fprintf(stderr, "unrport: RAM disc is %zu bytes; the limit is 2 MB\n", ramdisc.size());
+  if (ramdisc.size() > 0x40000) {
+    std::fprintf(stderr, "unrport: RAM disc is %zu bytes; the limit is 256 KB\n", ramdisc.size());
     return 1;
   }
 
