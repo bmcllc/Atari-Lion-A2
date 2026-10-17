@@ -27,8 +27,8 @@ static void SnapshotNativeSizes() {
 }
 
 extern "C" void lion_check_class_sizes() {
-  DumpClass("Engine.Texture");
-  DumpClass("Engine.Bitmap");
+  DumpClass("Fire.FractalTexture");
+  DumpClass("Fire.FireTexture");
   INT Bad = 0;
   for (FObjectIterator It(UClass::StaticClass); It; ++It) {
     UClass* C = (UClass*)*It;

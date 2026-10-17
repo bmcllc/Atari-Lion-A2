@@ -2,7 +2,7 @@
         .section .text.start,"ax"
         .globl  _start
 _start:
-        lis     1, 0x0170            # stack top at 23 MB (heap: 10-22 MB)
+        lis     1, 0x017F            # stack top just under 24 MB (stack: 22-24 MB, heap: 6-22 MB)
         mfmsr   3
         ori     3, 3, 0x2000         # MSR[FP]
         lis     4, 0

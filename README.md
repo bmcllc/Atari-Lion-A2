@@ -155,9 +155,10 @@ renderizador do BSP (pacote Render). Um pacote novo, `LionDrv`, faz o papel do `
 viewport, o dispositivo de render (`ULionRenderDevice`) que desenha pela Spike com Z-buffer, mipmaps e color key, e a
 entrada pelo controle. O áudio é o `NullAudioSubsystem`.
 
-Estado: o motor sobe (`UGameEngine::Init`), carrega o mapa `Entry.unr`, cria o jogador com o UnrealScript e
-desenha a sala com as texturas do próprio motor. Ainda faltam lightmaps, o pacote `UNreal.u` (37 MB, precisa de
-leitura do CD sob demanda), áudio, e um mapa jogável (o repositório só traz o `Entry.unr`).
+Estado: o motor sobe, o jogo `UNreal.SinglePlayer` (do pacote `UNreal.u`, lido do CD sob demanda) carrega em cerca de
+90 s de tempo emulado, o jogador `MaleOne` nasce no `Entry.unr` com o HUD e a arma do Unreal, e o jogo roda a 60 Hz
+com colisão e entrada pelo controle. Ainda faltam lightmaps, áudio, e um mapa de verdade (o repositório só traz o
+`Entry.unr`, uma sala cúbica); sem os mapas originais não há o jogo completo.
 
 Como funciona (`tools/unrport/`):
 - `core/build_core.sh` e `engine/build_engine.sh` copiam Core e Engine do checkout e aplicam `patch_core.py` /

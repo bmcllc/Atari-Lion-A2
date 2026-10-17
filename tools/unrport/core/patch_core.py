@@ -39,6 +39,9 @@ sub("Src/UnFile.cpp", "CORE_API INT DOUBLE appFloor( FLOAT Value )", "CORE_API I
 # Debugging aid: say which object holds a bad reference when the garbage collector trips.
 sub("Src/UnObj.cpp", "\t\tif( Obj )\n\t\t\tcheck(Obj->IsValid());", "\t\tif( Obj && !Obj->IsValid() )\n\t\t\tdebugf( \"GC: invalid reference %p from %s\", Obj, Context ? Context->GetFullName() : \"the root\" );\n\t\tif( Obj )\n\t\t\tcheck(Obj->IsValid());")
 
+# Debugging aid: report each object created from a package (rate limited).
+sub("Src/UnLinker.h", '\t\t\tdebugfSlow( NAME_DevLoad, "Created %s", Export._Object->GetFullName() );', '\t\t\t{ static INT Created; if( Created++ < 1500 && !Export._Object->IsA(UProperty::StaticClass) ) debugf( "Created %s", Export._Object->GetFullName() ); }')
+
 # Old MSVC leaks the loop variable of the three TMap::Find overloads out of the for statement.
 for old in ("\t\tfor( INT i=0; i<Pairs.Num(); i++ )\n\t\t\tif( Pairs(i).Key==Key )\n\t\t\t\tbreak;\n\t\tif( i<Pairs.Num() )",
             "\t\tfor (INT i = 0; i < Pairs.Num(); i++)\n\t\t\tif (Pairs(i).Key == Key)\n\t\t\t\tbreak;\n\t\tif (i < Pairs.Num())"):

@@ -25,7 +25,7 @@ CORE_API void VARARGS appErrorf(const char* Fmt, ...) {
 
 void FGlobalPlatform::WriteBinary(const void* Data, INT, EName Event) {
   const char* Kind = *FName(Event);
-  if (Kind[0] == 'D' && Kind[1] == 'e' && Kind[2] == 'v') return;  // DevBind/DevReplace/...: far too chatty
+  if (Kind[0] == 'D' && Kind[1] == 'e' && Kind[2] == 'v' && appStrcmp(Kind, "DevLoad")) return;  // DevBind/DevReplace/...: far too chatty
   static INT Warnings;
   if (!appStrcmp(Kind, "ScriptWarning") && ++Warnings > 8) return;  // a script warning repeats every tick
   log_text(Kind);
@@ -182,6 +182,13 @@ __class_type_info::~__class_type_info() {}
 
 // What appInit() does on Windows, minus the Windows: object manager, memory stack, platform hook.
 extern "C" void lion_core_init() {
+  {  // show a (black) screen with the loading bar from the first moment
+    volatile unsigned short* fb = (volatile unsigned short*)0x10000000;
+    for (INT i = 0; i < 320 * 240; ++i) fb[i] = 0;
+    *(volatile DWORD*)0x1F030000 = 1;
+    *(volatile DWORD*)0x1F030004 = 0x10000000;
+    *(volatile DWORD*)0x1F030008 = 640;
+  }
   lion_run_ctors();
   static FGlobalPlatform Platform;
   GSystem = &Platform;

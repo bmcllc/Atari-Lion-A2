@@ -16,6 +16,7 @@
 
 #include "iso9660.h"
 #include "loader.h"
+#include "ppcasm.h"
 
 namespace {
 
@@ -280,6 +281,7 @@ int main(int argc, char** argv) {
   std::string specs[3];  // wall, floor, ceiling
   float gain = 1.0f;
   bool hollow = false;  // --hollow: turn the solid cube of the stock Entry map into a room
+  std::vector<std::string> cd_files;     // --cdfile: files streamed from the CD (too big for the RAM disc)
   std::vector<std::string> extra_files;  // --file: more files for the RAM disc
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -287,6 +289,7 @@ int main(int argc, char** argv) {
     if (slot >= 0 && i + 1 < argc) specs[slot] = argv[++i];
     else if (a == "--gain" && i + 1 < argc) gain = std::strtof(argv[++i], nullptr);
     else if (a == "--hollow") hollow = true;
+    else if (a == "--cdfile" && i + 1 < argc) cd_files.push_back(argv[++i]);
     else if (a == "--file" && i + 1 < argc) extra_files.push_back(argv[++i]);
     else pos.push_back(a);
   }
@@ -373,18 +376,44 @@ int main(int argc, char** argv) {
     ramdisc.insert(ramdisc.end(), f.data.begin(), f.data.end());
     while (ramdisc.size() % 4) ramdisc.push_back(0);
   }
-  if (ramdisc.size() > 0x600000) {
-    std::fprintf(stderr, "unrport: RAM disc is %zu bytes; the limit is 6 MB\n", ramdisc.size());
+  if (ramdisc.size() > 0x200000) {
+    std::fprintf(stderr, "unrport: RAM disc is %zu bytes; the limit is 2 MB\n", ramdisc.size());
     return 1;
   }
 
   lion::LionImage img;
   img.entry = kClientAddr;
+  {  // External-interrupt handler at 0x500: acknowledge whatever is pending and return (wakes MSR[POW] doze).
+    using namespace ppcasm;
+    Asm a(0x500);
+    a << mtspr(272, 3) << mtspr(273, 4);
+    a << lis(3, 0x1F04) << li(4, 0xFF) << stw(4, 0, 3);
+    a << mfspr(4, 273) << mfspr(3, 272);
+    a << rfi();
+    img.segments.push_back({0x500, a.finish()});
+  }
+  {  // Decrementer handler at 0x900: the timer wraps every ~86 s; reload it and return.
+    using namespace ppcasm;
+    Asm a(0x900);
+    a << mtspr(272, 3) << lis(3, 0x7FFF) << mtspr(22, 3) << mfspr(3, 272);
+    a << rfi();
+    img.segments.push_back({0x900, a.finish()});
+  }
   img.segments.push_back({kClientAddr, client});
   img.segments.push_back({kTexTableAddr, table});
   img.segments.push_back({kRamDiscAddr, ramdisc});
   if (!texdata.empty()) img.segments.push_back({kTextureAddr, texdata});
-  const auto disc = iso9660::build("UNREAL", {{"BOOT.LION", img.serialize()}});
+  std::vector<iso9660::File> iso_files = {{"BOOT.LION", img.serialize()}};
+  for (const std::string& path : cd_files) {
+    iso9660::File f;
+    for (char c : path.substr(path.find_last_of('/') + 1)) f.name += char(std::toupper(static_cast<unsigned char>(c)));
+    if (!lion::read_file(path, &f.data)) {
+      std::fprintf(stderr, "unrport: cannot read %s\n", path.c_str());
+      return 1;
+    }
+    iso_files.push_back(std::move(f));
+  }
+  const auto disc = iso9660::build("UNREAL", iso_files);
   FILE* f = std::fopen(pos[2].c_str(), "wb");
   if (!f || std::fwrite(disc.data(), 1, disc.size(), f) != disc.size()) {
     std::fprintf(stderr, "unrport: cannot write %s\n", pos[2].c_str());

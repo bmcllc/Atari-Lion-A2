@@ -25,6 +25,8 @@ struct Options {
   long frames = -1;
   std::string dump;
   std::string dump_ram;  // file,hexaddr,hexlen
+  std::vector<std::pair<long, u32>> holds;  // --hold FRAME:HEXMASK[:LX:LY]: controller state from that frame on
+  std::vector<std::array<u8, 2>> hold_sticks;
   bool headless = false;
   int scale = 2;
   bool fast_boot = false;
@@ -32,7 +34,7 @@ struct Options {
 
 void usage() {
   std::fprintf(stderr,
-               "usage: lion [image.lion | disc.iso] [--frames N] [--dump out.ppm] [--dump-ram file,addr,len] [--headless]\n"
+               "usage: lion [image.lion | disc.iso] [--frames N] [--dump out.ppm] [--dump-ram file,addr,len] [--hold frame:mask[:lx:ly]] [--headless]\n"
                "            [--verbose] [--trace-tuffy] [--trace-quacker] [--scale N] [--strict-7400]\n"
                "            [--fast-boot]\n"
                "With no image, the console starts its dashboard with an empty CD drive.\n"
@@ -102,6 +104,14 @@ int run_headless(lion::Lion& sys, const Options& opt) {
   const long frames = opt.frames < 0 ? 60 : opt.frames;
   const auto t0 = std::chrono::steady_clock::now();
   for (long i = 0; i < frames; ++i) {
+    for (size_t h = 0; h < opt.holds.size(); ++h)
+      if (opt.holds[h].first == i) {
+        auto& p = sys.pads.port[0];
+        p.connected = true;
+        p.buttons = opt.holds[h].second;
+        p.lx = opt.hold_sticks[h][0];
+        p.ly = opt.hold_sticks[h][1];
+      }
     sys.run_frame();
     sys.audio.clear();
   }
@@ -157,6 +167,14 @@ int main(int argc, char** argv) {
     if (a == "--frames") opt.frames = std::atol(next());
     else if (a == "--dump") opt.dump = next(), opt.headless = true;
     else if (a == "--dump-ram") opt.dump_ram = next(), opt.headless = true;
+    else if (a == "--hold") {  // FRAME:HEXMASK[:LX:LY] (headless tests)
+      long frame = 0;
+      unsigned mask = 0, lx = 0x80, ly = 0x80;
+      std::sscanf(next(), "%ld:%x:%u:%u", &frame, &mask, &lx, &ly);
+      opt.holds.push_back({frame, mask});
+      opt.hold_sticks.push_back({u8(lx), u8(ly)});
+      opt.headless = true;
+    }
     else if (a == "--headless") opt.headless = true;
     else if (a == "--verbose") lion::g_verbose = true;
     else if (a == "--scale") opt.scale = std::max(1, std::atoi(next()));

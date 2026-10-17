@@ -15,9 +15,13 @@ cache="${UNRPORT_CACHE:-build/unrport-core}"
 engine="$cache-engine"
 [[ -d "$cache/Inc" ]] || "$here/core/build_core.sh" "$src/Source/Core" "$cache"
 [[ -d "$engine/Inc" ]] || "$here/engine/build_engine.sh" "$src/Source/Engine" "$engine"
-render="$cache-render"; sound="$cache-sound"; lion="$cache-liondrv"
+render="$cache-render"; sound="$cache-sound"; lion="$cache-liondrv"; fire="$cache-fire"
 if [[ ! -d "$render/Inc" ]]; then  # Render needs no source patches beyond the for-scope fixes done by compile_pkg.sh
   mkdir -p "$render" && cp -r "$src/Source/Render/Inc" "$src/Source/Render/Src" "$render/"
+fi
+if [[ ! -d "$fire/Inc" ]]; then  # procedural textures (fire, water, ice): C paths instead of x86 assembler
+  mkdir -p "$fire" && cp -r "$src/Source/Fire/Inc" "$src/Source/Fire/Src" "$fire/"
+  python3 -I "$here/fire/patch_fire.py" "$fire"
 fi
 if [[ ! -d "$sound/Src" ]]; then  # the null audio device, minus its Windows includes
   mkdir -p "$sound/Src" "$sound/Inc"
@@ -31,12 +35,13 @@ trap 'rm -rf "$tmp"' EXIT
 incs="$engine/Inc:$cache/Inc:$cache/Src"
 "$here/engine/compile_pkg.sh" Render "$render" "$incs"
 "$here/engine/compile_pkg.sh" SoundDrv "$sound" "$incs"
+"$here/engine/compile_pkg.sh" Fire "$fire" "$incs"
 "$here/engine/compile_pkg.sh" LionDrv "$lion" "$incs:$here/liondrv" "$here/liondrv/LionDrv.cpp" "$here/liondrv/LionRenDev.cpp"
 clang --target=powerpc-unknown-none-elf -c "$here/crt0.S" -o "$tmp/crt0.o"
 
 link() {
   ld.lld -m elf32ppc -T "$here/link.ld" -nostdlib "$tmp/crt0.o" "$@" --whole-archive "$cache/libcore.a" \
-      "$engine/libengine.a" "$render/libRender.a" "$sound/libSoundDrv.a" "$lion/libLionDrv.a" --no-whole-archive -o "$tmp/client.elf"
+      "$engine/libengine.a" "$render/libRender.a" "$fire/libFire.a" "$sound/libSoundDrv.a" "$lion/libLionDrv.a" --no-whole-archive -o "$tmp/client.elf"
 }
 # Native class objects are found by name (UPackage::GetDllExport): link once, collect the autoclass* symbols,
 # generate the export table and link again.
@@ -61,5 +66,6 @@ llvm-objcopy -O binary "$tmp/client.elf" "$tmp/client.bin"
 
 scripts="$src/Unreal/Scripts"
 "${UNRPORT:-build/unrport}" "$map" "$tmp/client.bin" "$out" "${@:3}" \
-    --file "$here/Lion.ini" --file "$scripts/Core.u" --file "$scripts/Engine.u" \
-    --file "$src/Engine/Localization/Core.int" --file "$src/Engine/Localization/Engine.int"
+    --file "$here/Lion.ini" --file "$scripts/Core.u" --file "$scripts/Engine.u" --file "$scripts/Fire.u" --file "$scripts/IpDrv.u" \
+    --file "$src/Engine/Localization/Core.int" --file "$src/Engine/Localization/Engine.int" \
+    --cdfile "$scripts/UNreal.u"  # the game (37 MB: scripts, meshes, textures, sounds), streamed from the CD

@@ -12,7 +12,7 @@ typedef unsigned int u32;
 typedef unsigned char u8;
 
 #define REG(a) (*(volatile u32 *)(a))
-enum : u32 { kHeapStart = 0x00A00000, kHeapEnd = 0x01600000, kRamDisc = 0x00400000, kRamDiscMagic = 0x4B534452 };
+enum : u32 { kHeapStart = 0x00600000, kHeapEnd = 0x01600000, kRamDisc = 0x00400000, kRamDiscMagic = 0x4B534452 };
 
 extern "C" {
 
@@ -77,39 +77,59 @@ int memcmp(const void* x, const void* y, size_t n) {
   return 0;
 }
 
-// Size-class allocator: 16-byte header, power-of-two classes with free lists, bump arena.
+// Segregated-fit allocator: 16-byte header, 16-byte steps up to 256 bytes, then four size classes per
+// octave (at most 25% waste), per-class free lists, bump arena.
 struct Hdr { u32 cls; u32 size; u32 pad[2]; };
 static u32 g_bump = kHeapStart;
-static Hdr* g_free[32];
+static Hdr* g_free[128];
+static u32 g_in_use;
+static u32 size_class(u32 n, u32* rounded) {
+  if (n <= 256) { *rounded = (n + 15) & ~15u; return (*rounded >> 4) - 1; }
+  const u32 msb = 31 - __builtin_clz(n - 1), step = 1u << (msb - 2);
+  const u32 sz = (n + step - 1) & ~(step - 1);
+  *rounded = sz;
+  return 16 + (msb - 8) * 4 + ((sz - (1u << msb)) / step - 1);
+}
 void* malloc(size_t n) {
-  u32 cls = 4;
-  while ((1u << cls) < n) ++cls;
+  u32 sz, cls = size_class(n ? (u32)n : 1, &sz);
   if (g_free[cls]) {
     Hdr* h = g_free[cls];
     g_free[cls] = *(Hdr**)(h + 1);
     h->size = (u32)n;
+    g_in_use += sz;
     return h + 1;
   }
-  u32 total = (1u << cls) + sizeof(Hdr);
-  if (g_bump + total > kHeapEnd) lion_halt("out of memory");
+  const u32 total = sz + sizeof(Hdr);
+  if (g_bump + total > kHeapEnd) {
+    char msg[64];
+    sprintf(msg, "out of memory: %u bytes, %u in use", (u32)n, g_in_use);
+    lion_halt(msg);
+  }
   Hdr* h = (Hdr*)g_bump;
   g_bump += total;
   h->cls = cls;
   h->size = (u32)n;
+  g_in_use += sz;
   return h + 1;
 }
 void free(void* p) {
   if (!p) return;
   Hdr* h = (Hdr*)p - 1;
+  u32 sz;
+  size_class(h->size ? h->size : 1, &sz);
+  g_in_use -= sz;
   *(Hdr**)p = g_free[h->cls];
   g_free[h->cls] = h;
 }
 void* realloc(void* p, size_t n) {
   if (!p) return malloc(n);
   Hdr* h = (Hdr*)p - 1;
-  if (n <= (1u << h->cls)) { h->size = (u32)n; return p; }
+  u32 cap, want;
+  size_class(h->size ? h->size : 1, &cap);
+  size_class(n ? (u32)n : 1, &want);
+  if (want == cap) { h->size = (u32)n; return p; }
   void* q = malloc(n);
-  memcpy(q, p, h->size);
+  memcpy(q, p, h->size < n ? h->size : n);
   free(p);
   return q;
 }
@@ -296,36 +316,174 @@ double pow(double x, double y) {
 long clock(void) { u32 tb; asm volatile("mftb %0" : "=r"(tb)); return (long)tb; }
 long time(long* t) { long v = clock() / 25000000; if (t) *t = v; return v; }
 
-// ---- stdio over the RAM disc ----------------------------------------------------------------
-struct _iobuf { const u8* data; long size, pos; };
-static _iobuf g_files[16];
+// ---- stdio: the RAM disc first, then ISO9660 files streamed from the CD ----------------------------
+enum : u32 { kCd = 0x1F060000, kPic = 0x1F040000, kCdChunk = 16 * 2048, kCdSlots = 16 };
+struct _iobuf {
+  const u8* data;  // RAM disc file, or NULL for a CD file
+  long size, pos;
+  u32 lba;         // first sector of a CD file
+  u8* chunk;       // CD read cache: kCdSlots chunks of kCdChunk bytes, least recently used replaced
+  long slot_at[kCdSlots];  // file offset held by each slot (-1 = empty)
+  u32 slot_age[kCdSlots], age;
+  bool used;
+};
+static _iobuf g_files[24];
+static void init_file(_iobuf* f, const u8* data, long size, u32 lba) {
+  f->data = data; f->size = size; f->pos = 0; f->lba = lba; f->chunk = 0; f->age = 0; f->used = true;
+  for (u32 i = 0; i < kCdSlots; ++i) f->slot_at[i] = -1, f->slot_age[i] = 0;
+}
+
+// Waits for the drive with the CPU dozing; the vblank/CD interrupt handler at 0x500 only acknowledges.
+static bool cd_wait() {
+  u32 msr;
+  asm volatile("mfmsr %0" : "=r"(msr));
+  const u32 doze = msr | 0x8000 | 0x40000;  // EE | POW
+  REG(kPic + 4) = 0x20;                      // PIC: CD interrupt
+  while (!(REG(kCd) & 8)) asm volatile("mtmsr %0; isync" : : "r"(doze));
+  asm volatile("mtmsr %0; isync" : : "r"(msr));
+  REG(kPic + 4) = 0;
+  const bool ok = !(REG(kCd) & 4);
+  REG(kCd + 4) = 3;  // acknowledge
+  return ok;
+}
+static bool cd_read(u32 lba, u32 count, void* dst) {
+  static u32 reads, sectors;
+  sectors += count;
+  if (reads < 6) {  // who is reading? walk the stack (SysV: back chain at 0(sp), LR at 4(frame))
+    u32* sp = (u32*)__builtin_frame_address(0);
+    char msg[160];
+    int n = sprintf(msg, "cd read %u: lba %u count %u from", reads, lba, count);
+    for (int d = 0; d < 9 && sp; ++d) {
+      u32* prev = (u32*)sp[0];
+      if (!prev || (u32)prev < 0x100000 || (u32)prev > 0x01800000) break;
+      n += sprintf(msg + n, " %x", prev[1]);
+      sp = prev;
+    }
+    lion_log(msg);
+  }
+  {  // loading bar on the front buffer: the disc is ~28000 sectors of assets
+    volatile unsigned short* fb = (volatile unsigned short*)0x10000000;
+    const u32 w = sectors * 300 / 28000 > 300 ? 300 : sectors * 300 / 28000;
+    for (u32 y = 224; y < 232; ++y)
+      for (u32 x = 10; x < 10 + w; ++x) fb[y * 320 + x] = 0xF800;  // red like the Lion
+  }
+  if (++reads % 100 == 0) {
+    char msg[96];
+    u32 tb;
+    asm volatile("mftb %0" : "=r"(tb));
+    sprintf(msg, "cd: %u reads, %u sectors (%u KB), last lba %u, t=%u s", reads, sectors, sectors * 2, lba, tb / 25000000);
+    lion_log(msg);
+  }
+  REG(kCd + 8) = lba;
+  REG(kCd + 12) = count;
+  REG(kCd + 16) = (u32)dst;
+  REG(kCd + 4) = 1;
+  return cd_wait();
+}
+
+// Looks a file up in the ISO9660 root directory (names compared case-insensitively, ";1" ignored).
+struct CdEntry { char name[40]; u32 lba, size; bool found; };
+static CdEntry g_cd_cache[24];
+static u32 g_cd_cached;
+static bool cd_find_uncached(const char* name, u32* lba, u32* size);
+static bool cd_find(const char* name, u32* lba, u32* size) {
+  for (u32 i = 0; i < g_cd_cached; ++i)
+    if (!stricmp(g_cd_cache[i].name, name)) { *lba = g_cd_cache[i].lba; *size = g_cd_cache[i].size; return g_cd_cache[i].found; }
+  const bool found = cd_find_uncached(name, lba, size);
+  if (g_cd_cached < 24 && strlen(name) < 40) {
+    CdEntry& e = g_cd_cache[g_cd_cached++];
+    strcpy(e.name, name);
+    e.found = found;
+    e.lba = found ? *lba : 0;
+    e.size = found ? *size : 0;
+  }
+  return found;
+}
+static bool cd_find_uncached(const char* name, u32* lba, u32* size) {
+  if (!(REG(kCd) & 1)) return false;  // no disc
+  static u8 sector[2048] __attribute__((aligned(32)));
+  if (!cd_read(16, 1, sector)) return false;
+  u32 dir_lba = sector[158] | sector[159] << 8 | sector[160] << 16 | (u32)sector[161] << 24;
+  u32 dir_size = sector[166] | sector[167] << 8 | sector[168] << 16 | (u32)sector[169] << 24;
+  for (u32 off = 0; off < dir_size; off += 2048) {
+    if (!cd_read(dir_lba + off / 2048, 1, sector)) return false;
+    for (u32 p = 0; p < 2048 && sector[p];) {
+      const u8 len = sector[p], nlen = sector[p + 32];
+      char entry[40];
+      u32 n = nlen < 39 ? nlen : 39, i = 0;
+      for (; i < n && sector[p + 33 + i] != ';'; ++i) entry[i] = (char)sector[p + 33 + i];
+      entry[i] = 0;
+      if (!stricmp(entry, name)) {
+        *lba = sector[p + 2] | sector[p + 3] << 8 | sector[p + 4] << 16 | (u32)sector[p + 5] << 24;
+        *size = sector[p + 10] | sector[p + 11] << 8 | sector[p + 12] << 16 | (u32)sector[p + 13] << 24;
+        return true;
+      }
+      p += len;
+    }
+  }
+  return false;
+}
 
 FILE* fopen(const char* path, const char* mode) {
   if (mode[0] != 'r') return 0;  // the disc is read-only
-  const u32* rd = (const u32*)kRamDisc;
-  if (rd[0] != kRamDiscMagic) return 0;
   const char* base = path;
   for (const char* p = path; *p; ++p) if (*p == '/' || *p == '\\') base = p + 1;
-  for (u32 i = 0; i < rd[1]; ++i) {
-    const char* name = (const char*)(rd + 2 + i * 14);  // 48-byte name, offset, size
-    if (stricmp(name, base) != 0) continue;
-    for (_iobuf& f : g_files)
-      if (!f.data) {
-        f.data = (const u8*)kRamDisc + rd[2 + i * 14 + 12];
-        f.size = (long)rd[2 + i * 14 + 13];
-        f.pos = 0;
-        return &f;
-      }
-  }
+  _iobuf* slot = 0;
+  for (_iobuf& f : g_files) if (!f.used) { slot = &f; break; }
+  if (!slot) return 0;
+  const u32* rd = (const u32*)kRamDisc;
+  if (rd[0] == kRamDiscMagic)
+    for (u32 i = 0; i < rd[1]; ++i) {
+      const char* name = (const char*)(rd + 2 + i * 14);  // 48-byte name, offset, size
+      if (stricmp(name, base) != 0) continue;
+      init_file(slot, (const u8*)kRamDisc + rd[2 + i * 14 + 12], (long)rd[2 + i * 14 + 13], 0);
+      return slot;
+    }
+  u32 lba, size;
+  if (!cd_find(base, &lba, &size)) return 0;
+  init_file(slot, 0, (long)size, lba);
+  return slot;
+}
+int fclose(FILE* f) {
+  if (!f) return 0;
+  free(f->chunk);
+  f->used = false;
   return 0;
 }
-int fclose(FILE* f) { if (f) f->data = 0; return 0; }
 size_t fread(void* p, size_t size, size_t n, FILE* f) {
   if (!f || !size) return 0;
   size_t have = (size_t)(f->size - f->pos) / size;
   if (n > have) n = have;
-  memcpy(p, f->data + f->pos, n * size);
-  f->pos += (long)(n * size);
+  size_t total = n * size;
+  if (f->data) {
+    memcpy(p, f->data + f->pos, total);
+    f->pos += (long)total;
+    return n;
+  }
+  u8* out = (u8*)p;
+  if (!f->chunk) f->chunk = (u8*)malloc(kCdSlots * kCdChunk + 32);
+  u8* base = (u8*)(((u32)f->chunk + 31) & ~31u);
+  while (total) {
+    const long at = f->pos & ~(long)(kCdChunk - 1);
+    int slot = -1;
+    for (u32 i = 0; i < kCdSlots; ++i) if (f->slot_at[i] == at) { slot = (int)i; break; }
+    if (slot < 0) {  // evict the least recently used chunk
+      slot = 0;
+      for (u32 i = 1; i < kCdSlots; ++i)
+        if (f->slot_at[i] < 0 || (f->slot_at[slot] >= 0 && f->slot_age[i] < f->slot_age[slot])) slot = (int)i;
+      const long left = f->size - at;
+      const u32 sectors = (u32)((left < (long)kCdChunk ? left : (long)kCdChunk) + 2047) / 2048;
+      if (!cd_read(f->lba + (u32)(at / 2048), sectors, base + slot * kCdChunk)) return 0;
+      f->slot_at[slot] = at;
+    }
+    f->slot_age[slot] = ++f->age;
+    size_t take = (size_t)(at + (long)kCdChunk - f->pos);
+    if (take > total) take = total;
+    memcpy(out, base + slot * kCdChunk + (f->pos - at), take);
+    out += take;
+    f->pos += (long)take;
+    total -= take;
+  }
   return n;
 }
 size_t fwrite(const void*, size_t, size_t, FILE*) { return 0; }
