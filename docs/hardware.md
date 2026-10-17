@@ -126,7 +126,8 @@ Cada comando começa com um cabeçalho `(opcode << 24) | número_de_palavras_de_
 Flags de `SET_MODE`: bit 0 Z test (LESS), bit 1 Z write, bit 2 Gouraud, bit 3 textura,
 bit 4 bilinear, bit 5 perspectiva, bit 6 alpha blend, bit 7 culling de faces traseiras,
 bit 8 mipmapping, bit 9 trilinear (mistura os dois níveis mais próximos), bit 10 blend
-aditivo (`destino + fonte × alfa`, saturado; para brilhos e texto).
+aditivo (`destino + fonte × alfa`, saturado; para brilhos e texto), bit 11 *color key* (com textura,
+pixels cujo texel é preto puro, RGB565 `0x0000`, não são desenhados: máscaras, fontes, grades).
 
 Mipmaps: os níveis ficam em sequência a partir do endereço da textura, cada um com metade
 da largura e da altura do anterior (mínimo 1×1). O nível é escolhido por pixel a partir da

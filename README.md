@@ -148,37 +148,40 @@ docs/           referência de hardware
 
 ## Unreal no Lion
 
-O código do **Core do Unreal 1** (o `ULinkerLoad`, `FArchive`, `FName` e o gerenciador de objetos do
-repositório [RedPandaProjects/UnrealEngine](https://github.com/RedPandaProjects/UnrealEngine)) é compilado com
-clang para o Tuffy e roda dentro do emulador. Ele abre o pacote `.unr` a partir de um RAM disc e lê o BSP do
-`Model` e o `PlayerStart`; o visualizador (`tools/unrport/client.cpp`) transforma a geometria na FPU e a
-desenha pela Spike, com Z-buffer, Gouraud e texturas.
+O **motor do Unreal 1** do repositório [RedPandaProjects/UnrealEngine](https://github.com/RedPandaProjects/UnrealEngine)
+é compilado com clang para o Tuffy e roda dentro do emulador: Core (objetos, nomes, pacotes), Engine (níveis,
+atores, física, `UGameEngine`), a máquina virtual do UnrealScript (as classes de `Engine.u` rodam de verdade) e o
+renderizador do BSP (pacote Render). Um pacote novo, `LionDrv`, faz o papel do `WinDrv`/`SoftDrv`: o cliente e o
+viewport, o dispositivo de render (`ULionRenderDevice`) que desenha pela Spike com Z-buffer, mipmaps e color key, e a
+entrada pelo controle. O áudio é o `NullAudioSubsystem`.
+
+Estado: o motor sobe (`UGameEngine::Init`), carrega o mapa `Entry.unr`, cria o jogador com o UnrealScript e
+desenha a sala com as texturas do próprio motor. Ainda faltam lightmaps, o pacote `UNreal.u` (37 MB, precisa de
+leitura do CD sob demanda), áudio, e um mapa jogável (o repositório só traz o `Entry.unr`).
 
 Como funciona (`tools/unrport/`):
-- `core/build_core.sh` copia o Core do checkout para uma pasta de trabalho e aplica `core/patch_core.py`
-  (MSVC antigo → clang, big-endian, sem as rotinas x86) e `core/hoist_for.py` (escopo de variável de `for`);
-  o checkout original nunca é modificado e nenhum código da Epic entra neste repositório;
-- `core/lionrt.cpp`: libc mínima, heap, arquivos do RAM disc e stubs da ABI de exceções (um `throw` trava);
-- `core/lionplat.cpp`: substitui o `UnPlat.cpp` do Windows (log, erros, inicialização do Core);
-- `core/level.cpp`: carrega a fase com o Core; `unrport.cpp` (no host) empacota o disco e converte as texturas
-  `.utx` (paleta de 256 cores e mipmaps) para RGB565.
+- `core/build_core.sh` e `engine/build_engine.sh` copiam Core e Engine do checkout e aplicam `patch_core.py` /
+  `patch_engine.py` (MSVC antigo → clang, big-endian, sem as rotinas x86) e `core/hoist_for.py` (escopo de
+  variável de `for`). O checkout nunca é modificado e nenhum código da Epic entra neste repositório. A
+  compilação usa o layout do MSVC (`-mms-bitfields -fpack-struct=4`), senão as classes do motor não batem com os
+  tamanhos do UnrealScript;
+- `core/lionrt.cpp`: libc mínima, heap, arquivos do RAM disc, ABI de exceções (um `throw` trava);
+- `core/lionplat.cpp`: substitui o `UnPlat.cpp` do Windows (log, config por `.ini`, tabela de classes nativas);
+- `engine/lionboot.cpp`: o `InitEngine()`/`MainLoop()` do Windows; `liondrv/`: o pacote LionDrv;
+- `unrport.cpp` (no host) empacota o disco: o mapa, `Core.u`, `Engine.u`, `Lion.ini` e as localizações.
 
 ```bash
 cmake --build build --target unrport
 ```
 
 ```bash
-UNREAL_SRC=/caminho/para/UnrealEngine tools/unrport/build.sh $UNREAL_SRC/Engine/Maps/Entry.unr build/unreal.iso \
-  --wall $UNREAL_SRC/Source/Unreal/Textures/MenuGr.utx:smlmet \
-  --floor $UNREAL_SRC/Source/Unreal/Textures/MenuGr.utx:rmetal \
-  --ceiling $UNREAL_SRC/Source/Unreal/Textures/MenuGr.utx:smlmet --gain 6
+UNREAL_SRC=/caminho/para/UnrealEngine tools/unrport/build.sh $UNREAL_SRC/Engine/Maps/Entry.unr build/unreal.iso
 ```
 
 ```bash
 ./build/lion --fast-boot --scale 3 build/unreal.iso
 ```
 
-Limites: ainda não há classes do pacote Engine (a validação dos imports é pulada, pois não existem `Engine.u`
-nem `Core.u` no disco), atores além do `PlayerStart`, lightmaps nem UnrealScript. O log do Core fica na RAM em
-`0x00380000` (`./build/lion --headless --frames 60 --dump-ram log.bin,380000,1000 disco.iso`; os 4 primeiros
-bytes são o tamanho). Uma tela vermelha indica erro fatal.
+O log do motor fica na RAM em `0x00380000` (`./build/lion --headless --frames 1200 --dump-ram log.bin,380000,10000
+disco.iso`; os 4 primeiros bytes são o tamanho). Uma tela vermelha indica erro fatal; `--dump` grava o último quadro
+e o fim da execução mostra PC/LR do Tuffy. O carregamento do motor leva alguns segundos de tempo emulado.

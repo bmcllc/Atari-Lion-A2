@@ -25,6 +25,7 @@ class Spike : public MmioDevice {
     kMipmap = 1u << 8,     // per-pixel level of detail
     kTrilinear = 1u << 9,  // blend the two nearest levels
     kBlendAdd = 1u << 10,  // additive blending: dst + src * alpha (glows, text)
+    kColorKey = 1u << 11,  // textured pixels whose texel is pure black (RGB565 0x0000) are not drawn
   };
   static constexpr size_t kFifoWords = 4096;
   static constexpr u32 kPixelsPerCycle = 2;
@@ -77,7 +78,7 @@ class Spike : public MmioDevice {
     u8* zbuf;
     u32 stride, width;
     int minx, maxx;
-    bool ztest, zwrite, additive, mip;
+    bool ztest, zwrite, additive, mip, colorkey;
     float tex_w, tex_h, lod;
   };
   template <bool kPersp, bool kGouraud, bool kTex, bool kBlend, bool kZ>

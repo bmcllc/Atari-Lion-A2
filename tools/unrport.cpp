@@ -145,6 +145,70 @@ struct Package {
   }
 };
 
+// Turns the solid BSP cube of the stock Entry.unr inside out so the level is a room: node planes, vertex
+// winding and surface normals are negated in place (sizes do not change).
+bool make_hollow(Package& pkg, std::string* err) {
+  auto flip_float = [&](size_t at) { pkg.d[at + 3] ^= 0x80; };
+  int fixed = 0;
+  for (const Export& e : pkg.exports) {
+    if (pkg.class_of(e) != "Model") continue;
+    std::map<std::string, std::vector<u8>> props;
+    Reader r{pkg.d, pkg.properties(e.offset, &props)};
+    for (int i = 0; i < 25 + 16; ++i) r.byte();
+    const int vectors = r.index(), points = r.index(), nodes = r.index(), surfs = r.index(), verts = r.index();
+    (void)points;
+    auto db = [&](int obj, u32* count) -> size_t {
+      if (obj < 1 || size_t(obj) > pkg.exports.size()) return 0;
+      std::map<std::string, std::vector<u8>> pp;
+      Reader q{pkg.d, pkg.properties(pkg.exports[size_t(obj) - 1].offset, &pp)};
+      *count = q.u32le();
+      q.u32le();
+      return q.ok ? q.p : 0;
+    };
+    u32 nn = 0, ns = 0, nvert = 0, nvec = 0;
+    const size_t node_at = db(nodes, &nn), surf_at = db(surfs, &ns), vert_at = db(verts, &nvert), vec_at = db(vectors, &nvec);
+    if (!node_at || !nn || !surf_at || !vert_at || !vec_at) continue;
+    // Surface normals.
+    Reader rs{pkg.d, surf_at};
+    std::vector<int> normals;
+    for (u32 i = 0; i < ns; ++i) {
+      rs.index(); rs.u32le(); rs.index();
+      normals.push_back(rs.index());
+      rs.index(); rs.index(); rs.index(); rs.index(); rs.u32le(); rs.index();
+    }
+    // Vertex pool entries must be two bytes each to be reversed in place.
+    std::vector<size_t> vpos;
+    Reader rv{pkg.d, vert_at};
+    for (u32 i = 0; i < nvert; ++i) {
+      vpos.push_back(rv.p);
+      rv.index(); rv.index();
+      if (rv.p - vpos.back() != 2) return *err = "unsupported vertex pool layout", false;
+    }
+    Reader rn{pkg.d, node_at};
+    for (u32 i = 0; i < nn; ++i) {
+      for (int k = 0; k < 4; ++k) flip_float(rn.p + size_t(k) * 4);
+      rn.p += 16;
+      rn.u32le(); rn.u32le(); rn.byte();
+      const int pool = rn.index();
+      rn.index();
+      for (int k = 0; k < 5; ++k) rn.index();
+      rn.byte(); rn.byte();
+      const int count = rn.byte();
+      rn.u32le(); rn.u32le();
+      if (pool < 0 || size_t(pool + count) > vpos.size()) return *err = "bad node vertex range", false;
+      for (int a = 0, b = count - 1; a < b; ++a, --b)
+        std::swap_ranges(pkg.d.begin() + long(vpos[size_t(pool + a)]), pkg.d.begin() + long(vpos[size_t(pool + a)] + 2),
+                         pkg.d.begin() + long(vpos[size_t(pool + b)]));
+    }
+    if (!rn.ok) return *err = "truncated nodes", false;
+    for (int n : normals)
+      if (n >= 0 && u32(n) < nvec)
+        for (int k = 0; k < 3; ++k) flip_float(vec_at + size_t(n) * 12 + size_t(k) * 4);
+    ++fixed;
+  }
+  return fixed > 0 || (*err = "no BSP model to turn into a room", false);
+}
+
 struct Texture {
   struct Mip {
     u32 w, h;
@@ -215,12 +279,14 @@ int main(int argc, char** argv) {
   std::vector<std::string> pos;
   std::string specs[3];  // wall, floor, ceiling
   float gain = 1.0f;
+  bool hollow = false;  // --hollow: turn the solid cube of the stock Entry map into a room
   std::vector<std::string> extra_files;  // --file: more files for the RAM disc
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const int slot = a == "--wall" ? 0 : a == "--floor" ? 1 : a == "--ceiling" ? 2 : -1;
     if (slot >= 0 && i + 1 < argc) specs[slot] = argv[++i];
     else if (a == "--gain" && i + 1 < argc) gain = std::strtof(argv[++i], nullptr);
+    else if (a == "--hollow") hollow = true;
     else if (a == "--file" && i + 1 < argc) extra_files.push_back(argv[++i]);
     else pos.push_back(a);
   }
@@ -242,10 +308,11 @@ int main(int argc, char** argv) {
     return 1;
   }
   Package check;
-  if (!check.load(pos[0], &err)) {  // fail early on files the Core would reject
+  if (!check.load(pos[0], &err) || (hollow && !make_hollow(check, &err))) {  // fail early on files the Core would reject
     std::fprintf(stderr, "unrport: %s\n", err.c_str());
     return 1;
   }
+  if (hollow) unr = check.d;
 
   // Textures: identical specs share one copy in SGRAM.
   std::vector<Texture> textures;

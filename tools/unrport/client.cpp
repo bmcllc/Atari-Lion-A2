@@ -117,7 +117,7 @@ extern "C" int main(void) {
   lion_core_init();
   lion_engine_test();
   lion_engine_boot();
-  for (;;) lion_engine_tick();
+  for (;;) lion_engine_tick();  // draws through ULionRenderDevice (liondrv/LionRenDev.cpp)
   if (!lion_level_load("level.unr", &g_level)) lion_halt("level load failed");
   const u32 npoly = g_level.count;
   const u32 *tt = (const u32 *)TEXTAB_ADDR;

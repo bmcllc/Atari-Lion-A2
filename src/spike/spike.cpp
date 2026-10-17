@@ -271,6 +271,7 @@ void Spike::draw_triangle(const Vertex in[3]) {
   su.ztest = ztest;
   su.zwrite = zwrite;
   su.additive = additive;
+  su.colorkey = textured && (mode & kColorKey);
   su.mip = mip;
   su.tex_w = tex_w;
   su.tex_h = tex_h;
@@ -386,6 +387,7 @@ u64 Spike::raster(const Spike& sp, const Setup& in, int y_begin, int y_end) {
           lod = m > 0.0f ? 0.5f * fast_log2(m) : 0.0f;  // log2 of the larger footprint length
         }
         const u32 t = sp.sample_lod(u, tv, lod);
+        if (su.colorkey && (t & 0xFFFFFF) == 0) continue;  // transparent texel
         r *= float((t >> 16) & 0xFF) * k255;
         g *= float((t >> 8) & 0xFF) * k255;
         b *= float(t & 0xFF) * k255;

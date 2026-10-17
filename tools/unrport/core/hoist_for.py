@@ -8,6 +8,7 @@ import re, subprocess, sys, pathlib
 src, flags = sys.argv[1], sys.argv[2:]
 decl = re.compile(r'for\s*\(\s*((?:unsigned\s+|const\s+)*[A-Za-z_][\w:]*(?:<[^>;]*>)?[\s\*&]+)(\w+)\s*=([^;]*);')
 ctor = re.compile(r'for\s*\(\s*([A-Za-z_][\w:]*<[^>;]*>\s+)(\w+)\s*(\([^;]*\))\s*;')
+ctl = re.compile(r'^\s*(\}\s*)?(else\s+)?(if|while|for)\b.*\)\s*$|^\s*else\s*$')
 hoisted = re.compile(r'^(\s*)((?:unsigned\s+|const\s+)*[A-Za-z_][\w:]*(?:<[^>;]*>)?[\s\*&]+)(\w+); for\( (\w+)\s*=')
 
 for round_ in range(60):
@@ -23,20 +24,31 @@ for round_ in range(60):
         f = pathlib.Path(path)
         lines = f.read_text(encoding="latin-1").split("\n")
         edits = {}
+        inserts = {}  # line index -> declaration lines placed before it
         for (line, name), kind in errs.items():
             if kind.startswith("redefinition"):
                 m = hoisted.match(lines[line - 1])
                 if m and m.group(3) == name:
                     edits[line - 1] = m.group(1) + "for( " + name + " =" + lines[line - 1][m.end():]
                 continue
-            for i in range(line - 1, max(line - 400, -1), -1):
+            use_indent = len(lines[line - 1]) - len(lines[line - 1].lstrip())
+            for i in range(line - 1, max(line - 2500, -1), -1):
+                if len(lines[i]) - len(lines[i].lstrip()) > use_indent and lines[i].strip():
+                    continue  # a declaration in a deeper block cannot be the one that leaked to this scope
                 m = decl.search(lines[i])
                 if m:
                     names = [m.group(2)] + re.findall(r',\s*(\w+)\s*=', m.group(3))
                     if name in names:
                         if i not in edits:
-                            edits[i] = (lines[i][:m.start()] + m.group(1) + ", ".join(names) + "; for( " + m.group(2) + " =" +
-                                        m.group(3) + ";" + lines[i][m.end():])
+                            if i > 0 and ctl.match(lines[i - 1]):
+                                # `if( c ) for( INT i=...` : declare before the whole statement instead
+                                indent = re.match(r'\s*', lines[i - 1]).group(0)
+                                inserts.setdefault(i - 1, []).append(indent + m.group(1) + ", ".join(names) + ";")
+                                edits[i] = (lines[i][:m.start()] + "for( " + m.group(2) + " =" + m.group(3) + ";" +
+                                            lines[i][m.end():])
+                            else:
+                                edits[i] = (lines[i][:m.start()] + m.group(1) + ", ".join(names) + "; for( " + m.group(2) +
+                                            " =" + m.group(3) + ";" + lines[i][m.end():])
                         break
                 m = ctor.search(lines[i])
                 if m and m.group(2) == name:
@@ -46,6 +58,8 @@ for round_ in range(60):
         for i, new in edits.items():
             lines[i] = new
             changed = True
+        for i in sorted(inserts, reverse=True):
+            lines[i:i] = inserts[i]
         f.write_text("\n".join(lines), encoding="latin-1")
     if not changed:
         break
