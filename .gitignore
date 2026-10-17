@@ -1,0 +1,4 @@
+build/
+*.ppm
+*.lion
+*.iso
