@@ -9,6 +9,7 @@
 #include <direct.h>
 
 typedef unsigned int u32;
+typedef unsigned short u16;
 typedef unsigned char u8;
 
 #define REG(a) (*(volatile u32 *)(a))
@@ -32,6 +33,18 @@ void lion_halt(const char* why) {
   g_panic = why;
   lion_log("HALT:");
   lion_log(why);
+  {  // where from: return addresses up the stack (SysV back chain)
+    u32* sp = (u32*)__builtin_frame_address(0);
+    char msg[160];
+    int n = sprintf(msg, "stack:");
+    for (int d = 0; d < 14 && sp; ++d) {
+      u32* prev = (u32*)sp[0];
+      if (!prev || (u32)prev < 0x100000 || (u32)prev > 0x01800000) break;
+      n += sprintf(msg + n, " %x", prev[1]);
+      sp = prev;
+    }
+    lion_log(msg);
+  }
   // Panic screen: red 320x240 frame on the SGRAM so a stuck boot is visible.
   volatile unsigned short* fb = (volatile unsigned short*)0x10000000;
   for (int i = 0; i < 320 * 240; ++i) fb[i] = 0xF800;
@@ -97,14 +110,6 @@ static u32 size_class(u32 n, u32* rounded) {
 void lion_heap_stats(u32* used, u32* arena_left) { *used = g_in_use; *arena_left = kHeapEnd - g_bump; }
 u32 lion_heap_capacity() { return kHeapEnd - kHeapStart; }
 void* malloc(size_t n) {
-  if (n >= 400000) {  // big allocations: who asks? (return addresses up the stack)
-    u32* c1 = *(u32**)__builtin_frame_address(0);
-    u32* c2 = c1 ? *(u32**)c1 : 0;
-    u32* c3 = c2 ? *(u32**)c2 : 0;
-    char m[96];
-    sprintf(m, "bigalloc %u from %x %x %x %x", (u32)n, (u32)__builtin_return_address(0), c1 ? c1[1] : 0, c2 ? c2[1] : 0, c3 ? c3[1] : 0);
-    lion_log(m);
-  }
   u32 sz, cls = size_class(n ? (u32)n : 1, &sz);
   if (g_free[cls]) {
     Hdr* h = g_free[cls];
@@ -576,7 +581,7 @@ static void cd_load_preload() {
 // Brings a chunk of a CD file into the cache and returns its slot. A chunk named by the preload map is read
 // together with the chunks that follow it on the disc (one read into the staging area): the order is the one of
 // the recorded load, so those are the next chunks the game asks for.
-static int cd_fetch(_iobuf* f, u32 chunk, u8* base) {
+static int cd_fetch(_iobuf* f, u32 chunk, u8* base, u32 want) {
   if (!g_pre_tried) cd_load_preload();
   bool seen = false;  // touched before: a chunk the cache let go, which is read alone
   {  // record the first touch of each chunk
@@ -599,34 +604,43 @@ static int cd_fetch(_iobuf* f, u32 chunk, u8* base) {
   int from = -1;  // staged copy
   for (u32 i = 0; i < kStageGroups * kCdGroup && from < 0; ++i)
     if (g_stage_lba[i] == f->id && g_stage_chunk[i] == chunk) from = (int)i;
-  if (from < 0 && !seen) {
+  if (from < 0) {
+    // Read a run into the staging area: the chunks that follow this one on the disc when the preload map names it,
+    // otherwise the chunks the caller wants (a sound, an object) and a few more, straight from the file.
     int p = -1;
-    for (u32 i = g_pre_hot; i < g_pre_n; ++i) if (g_pre_ent[2 * i] == f->id && g_pre_ent[2 * i + 1] == chunk) { p = (int)i; break; }
-    if (p >= 0) {
-      if (!g_stage) g_stage = (u8*)malloc(kStageGroups * kCdGroup * kCdChunk + 32);
-      u8* sbase = (u8*)(((u32)g_stage + 31) & ~31u);
-      const u32 g = g_stage_next++ % kStageGroups;
-      const u32 cnt = g_pre_n - (u32)p < kCdGroup ? g_pre_n - (u32)p : kCdGroup;
-      for (u32 j = 0; j < kCdGroup; ++j) g_stage_lba[g * kCdGroup + j] = 0;
-      if (!cd_read(g_pre_lba + (u32)p * (kCdChunk / 2048u), cnt * (kCdChunk / 2048u), sbase + g * kCdGroup * kCdChunk)) return -1;
-      for (u32 j = 0; j < cnt; ++j) {
-        g_stage_lba[g * kCdGroup + j] = g_pre_ent[2 * (p + j)];
-        g_stage_chunk[g * kCdGroup + j] = g_pre_ent[2 * (p + j) + 1];
-      }
-      from = (int)(g * kCdGroup);
-      ++g_n_group;
-    }
-  }
-  if (from >= 0) {
+    if (!seen)
+      for (u32 i = g_pre_hot; i < g_pre_n; ++i) if (g_pre_ent[2 * i] == f->id && g_pre_ent[2 * i + 1] == chunk) { p = (int)i; break; }
+    if (!g_stage) g_stage = (u8*)malloc(kStageGroups * kCdGroup * kCdChunk + 32);
     u8* sbase = (u8*)(((u32)g_stage + 31) & ~31u);
-    memcpy(dst, sbase + from * kCdChunk, kCdChunk);
-  } else {  // not in the map, or let go by the cache: read just this chunk
-    if (seen) ++g_n_seen; else ++g_n_unmapped;
-    
-    const long at = (long)chunk * kCdChunk, left = f->size - at;
-    const u32 sectors = (u32)((left < (long)kCdChunk ? left : (long)kCdChunk) + 2047) / 2048;
-    if (!cd_read(f->lba + chunk * (kCdChunk / 2048u), sectors, dst)) return -1;
+    const u32 g = g_stage_next++ % kStageGroups;
+    u32 cnt, lba;
+    if (p >= 0) {
+      cnt = g_pre_n - (u32)p < kCdGroup ? g_pre_n - (u32)p : kCdGroup;
+      lba = g_pre_lba + (u32)p * (kCdChunk / 2048u);
+      ++g_n_group;
+    } else {
+      const u32 in_file = (u32)((f->size - (long)chunk * kCdChunk + kCdChunk - 1) / kCdChunk);
+      cnt = want < 4 ? 4 : want;
+      if (cnt > kCdGroup) cnt = kCdGroup;
+      if (cnt > in_file) cnt = in_file;
+      lba = f->lba + chunk * (kCdChunk / 2048u);
+      if (seen) ++g_n_seen; else ++g_n_unmapped;
+    }
+    // The last chunk of a file may be short: read only the sectors it has.
+    u32 sectors = cnt * (kCdChunk / 2048u);
+    if (p < 0) {
+      const long end = (long)(chunk + cnt) * kCdChunk;
+      if (end > f->size) sectors -= (u32)((end - f->size) / 2048);
+    }
+    for (u32 j = 0; j < kCdGroup; ++j) g_stage_lba[g * kCdGroup + j] = 0;
+    if (!cd_read(lba, sectors, sbase + g * kCdGroup * kCdChunk)) return -1;
+    for (u32 j = 0; j < cnt; ++j) {
+      g_stage_lba[g * kCdGroup + j] = p >= 0 ? g_pre_ent[2 * (p + j)] : f->id;
+      g_stage_chunk[g * kCdGroup + j] = p >= 0 ? g_pre_ent[2 * (p + j) + 1] : chunk + j;
+    }
+    from = (int)(g * kCdGroup);
   }
+  memcpy(dst, (u8*)(((u32)g_stage + 31) & ~31u) + from * kCdChunk, kCdChunk);
   g_slot_lba[slot] = f->id;
   g_slot_chunk[slot] = chunk;
   return slot;
@@ -650,21 +664,36 @@ size_t fread(void* p, size_t size, size_t n, FILE* f) {
     const u32 chunk = (u32)(at / kCdChunk);
     static u32 last_id, last_chunk;  // most reads hit the chunk of the previous one
     static const u8* last_src;
+    static int last_slot = -1;       // LRU slot of last_src (-1 when kept)
+    static u16 tab[1024];            // (file, chunk) -> LRU slot + 1, or 0x8000 | kept index: a hint, checked on use
+    const u32 h = ((f->id ^ chunk * 2654435761u) * 2246822519u) >> 22;
     const u8* src = (last_src && last_id == f->id && last_chunk == chunk) ? last_src : 0;
+    int slot_used = src ? last_slot : -1;
+    if (!src && tab[h]) {
+      const u32 e = tab[h];
+      if (e & 0x8000) {
+        const u32 i = e & 0x7FFF;
+        if (i < g_pre_hot && g_pre_ent[2 * i] == f->id && g_pre_ent[2 * i + 1] == chunk) src = g_pin + i * kCdChunk;
+      } else if (g_slot_lba[e - 1] == f->id && g_slot_chunk[e - 1] == chunk) {
+        src = base + (e - 1) * kCdChunk;
+        slot_used = (int)e - 1;
+      }
+    }
     for (u32 i = 0; !src && i < kCdSlots; ++i)
-      if (g_slot_lba[i] == f->id && g_slot_chunk[i] == chunk) { src = base + i * kCdChunk; g_slot_age[i] = ++g_cd_age; }
-    if (!src && g_pre_tried) {  // kept chunks
-      const u8* pbase = g_pin;
+      if (g_slot_lba[i] == f->id && g_slot_chunk[i] == chunk) { src = base + i * kCdChunk; slot_used = (int)i; tab[h] = (u16)(i + 1); }
+    if (!src && g_pre_tried)  // kept chunks
       for (u32 i = 0; !src && i < g_pre_hot; ++i)
-        if (g_pre_ent[2 * i] == f->id && g_pre_ent[2 * i + 1] == chunk) src = pbase + i * kCdChunk;
-    }
+        if (g_pre_ent[2 * i] == f->id && g_pre_ent[2 * i + 1] == chunk) { src = g_pin + i * kCdChunk; tab[h] = (u16)(0x8000 | i); }
     if (!src) {
-      const int slot = cd_fetch(f, chunk, base);
+      const u32 want = (u32)((total + (size_t)(f->pos - at) + kCdChunk - 1) / kCdChunk);  // chunks this read still needs
+      const int slot = cd_fetch(f, chunk, base, want);
       if (slot < 0) return 0;
-      g_slot_age[slot] = ++g_cd_age;
       src = base + slot * kCdChunk;
+      slot_used = slot;
+      tab[h] = (u16)(slot + 1);
     }
-    last_id = f->id; last_chunk = chunk; last_src = src;
+    if (slot_used >= 0) g_slot_age[slot_used] = ++g_cd_age;
+    last_id = f->id; last_chunk = chunk; last_src = src; last_slot = slot_used;
     size_t take = (size_t)(at + (long)kCdChunk - f->pos);
     if (take > total) take = total;
     memcpy(out, src + (f->pos - at), take);

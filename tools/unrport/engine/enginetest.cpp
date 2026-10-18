@@ -98,3 +98,14 @@ extern "C" void lion_census(const char* Tag) {
   lion_tag_report();
   lion_class_report();
 }
+
+// Called while a texture loads: whether to drop its top mipmap (see patch_engine.py). The first megabyte of
+// full-size textures is kept as it is; after that, large ones lose their top level and so three quarters of
+// their memory.
+extern "C" int lion_drop_top_mip(UTexture* Texture) {
+  static INT Kept;
+  const INT Bytes = Texture->Mips(0).DataArray.Num();
+  if (Texture->USize < 128 && Texture->VSize < 128) return 0;
+  if (Kept + Bytes <= (1 << 20)) { Kept += Bytes; return 0; }
+  return 1;
+}

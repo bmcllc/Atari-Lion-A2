@@ -39,4 +39,12 @@ edit("Src/UnAudio.cpp", lambda t: t.replace("\t\tAr << Data;\n\t\tif( Ar.IsLoadi
     "\t\tif( Ar.IsLoading() )\n\t\t{\n\t\t\tINT SkipCount = 0;\n\t\t\tAr << AR_INDEX(SkipCount);\n\t\t\tHandle = (void*)(DWORD)Ar.Tell();\n\t\t\tAr.Seek( Ar.Tell() + SkipCount );\n\t\t\tOriginalSize = SkipCount;\n\t\t\treturn;\n\t\t}\n\t\tAr << Data;\n\t\tif( Ar.IsLoading() )\n\t\t{\n\t\t\t// Derive these from the exposed", 1))
 # The temporary camera that the editor's lighting code opens is spawned with a role other than authority.
 edit("Src/UnLevAct.cpp", lambda t: t.replace("\tcheck(Actor->Role==ROLE_Authority);\n", "\t// (lion) view actors of editor cameras are not authoritative\n", 1))
+# Textures cost 8 MB of the 22 MB heap; the engine already has a "low detail textures" mode that drops the top
+# mipmap. Here it applies to the large textures that load after the first megabyte (the HUD and fonts come first).
+edit("Src/UnTex.cpp", lambda t: t.replace("\t&&\tClient \n\t&&\tClient->LowDetailTextures\n\t&&\tMips.Num()>1 )", "\t&&\tMips.Num()>1\n\t&&\tlion_drop_top_mip( this ) )", 1))
+edit("Src/UnTex.cpp", lambda t: t.replace("void UTexture::Serialize( FArchive& Ar )", 'extern "C" int lion_drop_top_mip( UTexture* Texture );\nvoid UTexture::Serialize( FArchive& Ar )', 1))
+# (lion) pathfinding can ask for a jump to a point right above/below the pawn: vel/velsize is then 0/0 = NaN, which poisons Location and the collision hash.
+edit("Src/UnPawn.cpp", lambda t: t.replace('\t\tFLOAT velsize = vel.Size();\n\t\tvel = vel/velsize;', '\t\tFLOAT velsize = vel.Size();\n\t\tif( velsize < 0.0001f ) velsize = 1.f;\n\t\tvel = vel/velsize;', 1))
+# (lion) never let a non-finite delta reach the actor's Location.
+edit("Src/UnLevAct.cpp", lambda t: t.replace('\t// Set up.\n\tHit = FCheckResult(1.0);', '\tif( !(Delta.X==Delta.X && Delta.Y==Delta.Y && Delta.Z==Delta.Z) ) Delta = FVector(0,0,0);\n\t// Set up.\n\tHit = FCheckResult(1.0);', 1))
 print("patch_engine: ok")
