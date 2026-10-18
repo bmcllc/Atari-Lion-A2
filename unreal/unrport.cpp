@@ -1,7 +1,7 @@
 // Unreal-on-Lion packager.
 //   unrport Map.unr client.bin out.iso [--wall P.utx:Name] [--floor P.utx:Name] [--ceiling P.utx:Name] [--gain N]
 // Packs a bootable Lion disc: the PowerPC viewer, the .unr package on a RAM disc (the viewer reads it
-// with Unreal's own Core, see tools/unrport/core) and, optionally, textures from .utx packages
+// with Unreal's own Core, see unreal/core) and, optionally, textures from .utx packages
 // (8-bit palettized with mipmaps, converted to RGB565 for the Spike).
 #include <algorithm>
 #include <cctype>

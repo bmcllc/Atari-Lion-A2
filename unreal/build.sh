@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the Unreal-on-Lion port: the PowerPC viewer (with Unreal's Core and Engine compiled for the Lion)
 # and a bootable disc from a .unr map.
-#   UNREAL_SRC=path/to/UnrealEngine tools/unrport/build.sh Map.unr out.iso \
+#   UNREAL_SRC=path/to/UnrealEngine unreal/build.sh Map.unr out.iso \
 #       [--wall P.utx:Name] [--floor P.utx:Name] [--ceiling P.utx:Name] [--gain N] \
 #       [--start Name.unr] [--next Name.unr] [--song Package.Object] [--cdfile Other.unr]...
 # Without --start the game begins in the stock Entry level, which the client fills with a level built on the device.

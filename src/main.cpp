@@ -123,7 +123,7 @@ int run_headless(lion::Lion& sys, const Options& opt) {
                   sys.tuffy.first_illegal_pc, sys.tuffy.first_illegal_lr, sys.tuffy.first_illegal_sp);
       break;
     }
-    // --until-log: stop once the guest's log ring (0x1F0000, see tools/unrport) contains the text.
+    // --until-log: stop once the guest's log ring (0x1F0000, see unreal/) contains the text.
     if (!opt.until_log.empty() && i % 30 == 29)
       if (const u8* p = sys.bus.host_range(0x1F0000, 0x20000)) {
         const std::string log(reinterpret_cast<const char*>(p) + 4, 0x20000 - 4);

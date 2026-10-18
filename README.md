@@ -205,7 +205,7 @@ um cache de blocos compartilhado. Quando o heap aperta, o jogo coleta lixo e esv
 jogo é o contador de quadros do vídeo: cada tick avança o mundo pelos quadros de 60 Hz que passaram (de 1 a 6) e
 espera o próximo vblank quando termina cedo.
 
-Como funciona (`tools/unrport/`):
+Como funciona (`unreal/`):
 - `core/build_core.sh` e `engine/build_engine.sh` copiam Core e Engine do checkout e aplicam `patch_core.py` /
   `patch_engine.py` (MSVC antigo → clang, big-endian, sem as rotinas x86) e `core/hoist_for.py` (escopo de
   variável de `for`). O checkout nunca é modificado e nenhum código da Epic entra neste repositório. A
@@ -223,7 +223,7 @@ cmake --build build --target unrport
 ```
 
 ```bash
-UNREAL_SRC=/caminho/para/UnrealEngine tools/unrport/build.sh $UNREAL_SRC/Engine/Maps/Entry.unr build/unreal.iso
+UNREAL_SRC=/caminho/para/UnrealEngine unreal/build.sh $UNREAL_SRC/Engine/Maps/Entry.unr build/unreal.iso
 ```
 
 ```bash
