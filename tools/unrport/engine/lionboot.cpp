@@ -25,6 +25,40 @@ static void SpawnArena() {
   }
 }
 
+// The stock Entry level is the empty room the map builder fills; any other level (from the disc) is played as it is.
+static ULevel* GEnteredLevel;
+static void EnterLevel() {
+  UGameEngine* Game = (UGameEngine*)GLionEngine;
+  if (!Game->GLevel) return;
+  // A new level may be allocated where the old one was, so the clock (restarted by a load) tells them apart too.
+  static FLOAT LastTime;
+  const FLOAT Now = Game->GLevel->TimeSeconds;
+  const UBOOL Same = Game->GLevel == GEnteredLevel && Now >= LastTime;
+  LastTime = Now;
+  if (Same) return;
+  GEnteredLevel = Game->GLevel;
+  const char* Name = Game->GLevel->GetParent()->GetName();
+  debugf("level: %s", Name);
+  if (!appStricmp(Name, "Entry")) LionBuildMap(Game);
+  GLastTickFrame = *(volatile DWORD*)kViFrame;
+}
+
+// The generated level ends at a green light in its north-east gallery: walking into it travels to the map named by
+// "NextMap" in the [Lion] section of Lion.ini (default: the stock Entry, which is built again). A real map from the
+// disc brings its own exits (Teleporters and triggers), handled by the engine.
+static void CheckExit() {
+  UGameEngine* Game = (UGameEngine*)GLionEngine;
+  if (!Game->GLevel || appStricmp(Game->GLevel->GetParent()->GetName(), "Entry")) return;
+  UViewport* V = Game->Client && Game->Client->Viewports.Num() ? Game->Client->Viewports(0) : NULL;
+  if (!V || !V->Actor) return;
+  const FVector D = V->Actor->Location - FVector(960, 1330, 40);
+  if (D.X * D.X + D.Y * D.Y > 48.f * 48.f || Abs(D.Z) > 80.f) return;
+  char Next[64] = "Entry";
+  GetConfigString("Lion", "NextMap", Next, sizeof(Next));
+  debugf("exit reached: travel to %s", Next);
+  Game->SetClientTravel(V, Next, 1, 0, TRAVEL_Relative);
+}
+
 extern "C" void lion_engine_boot() {
   GSceneMem.Init(32768);
   GDynMem.Init(65536);
@@ -32,8 +66,8 @@ extern "C" void lion_engine_boot() {
   GLionEngine = ConstructClassObject<UEngine>(EngineClass);
   lion_check_class_sizes();
   GLionEngine->Init();
-  LionBuildMap((UGameEngine*)GLionEngine);
   GIsRunning = 1;
+  EnterLevel();
   GLastTickFrame = *(volatile DWORD*)kViFrame;
 }
 
@@ -92,6 +126,11 @@ extern "C" void lion_engine_tick() {
     LastPerf = Vi;
   }
   WatchMemory(Ticks);
+#ifdef LION_TEST_TRAVEL
+  if (Ticks == LION_TEST_TRAVEL) { debugf("test: walk into the exit"); UViewport* V = ((UGameEngine*)GLionEngine)->Client->Viewports(0); ((UGameEngine*)GLionEngine)->GLevel->FarMoveActor(V->Actor, FVector(960, 1330, 40), 1, 1); }
+#endif
   GLionEngine->Tick((FLOAT)Frames * (1.0f / 60.0f));
+  CheckExit();
+  EnterLevel();  // a travel (Browse) swaps the level during Tick
   if (*(volatile DWORD*)kViFrame == Vi) WaitVblank();  // finished within the frame: wait for the next one
 }

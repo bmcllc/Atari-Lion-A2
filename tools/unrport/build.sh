@@ -2,7 +2,11 @@
 # Builds the Unreal-on-Lion port: the PowerPC viewer (with Unreal's Core and Engine compiled for the Lion)
 # and a bootable disc from a .unr map.
 #   UNREAL_SRC=path/to/UnrealEngine tools/unrport/build.sh Map.unr out.iso \
-#       [--wall P.utx:Name] [--floor P.utx:Name] [--ceiling P.utx:Name] [--gain N]
+#       [--wall P.utx:Name] [--floor P.utx:Name] [--ceiling P.utx:Name] [--gain N] \
+#       [--start Name.unr] [--cdfile Other.unr]...
+# Without --start the game begins in the stock Entry level, which the client fills with a level built on the device.
+# --start makes another map (put on the disc with --cdfile, together with its textures/sounds/music packages) the first
+# level; maps are played as they are, and travel between them is the engine's (Teleporters, triggers, "open").
 # UNREAL_SRC is a checkout of https://github.com/RedPandaProjects/UnrealEngine (its Core and Engine are
 # patched in scratch copies; the checkout is never modified). Requires clang with the PowerPC target, ld.lld,
 # llvm-ar, llvm-nm, llvm-objcopy, python3 and a built `unrport`.
@@ -78,10 +82,18 @@ if (( bss_end > 0x1F0000 )); then echo "build.sh: the client image ends at $(pri
 
 scripts="$src/Unreal/Scripts"
 opts=("${@:3}")
+ini="$here/Lion.ini"
+for ((i = 0; i < ${#opts[@]}; i++)); do  # --start Name.unr: the first level
+  if [[ "${opts[i]}" == --start ]]; then
+    ini="$tmp/Lion.ini"
+    sed "s/^LocalMap=.*/LocalMap=${opts[i+1]}/" "$here/Lion.ini" > "$ini"
+    unset 'opts[i]' 'opts[i+1]'; opts=("${opts[@]}"); break
+  fi
+done
 pack() {  # pack <out.iso> [extra unrport options]
   local iso="$1"; shift
   "${UNRPORT:-build/unrport}" "$map" "$tmp/client.bin" "$iso" "${opts[@]}" \
-      --file "$here/Lion.ini" --file "$scripts/Core.u" --file "$scripts/Fire.u" --file "$scripts/IpDrv.u" \
+      --file "$ini" --file "$scripts/Core.u" --file "$scripts/Fire.u" --file "$scripts/IpDrv.u" \
       --file "$src/Engine/Localization/Core.int" --file "$src/Engine/Localization/Engine.int" \
       --cdfile "$scripts/Engine.u" --cdfile "$scripts/Editor.u" --cdfile "$scripts/UNreal.u" "$@"
 }  # UNreal.u is the game (37 MB: scripts, meshes, textures, sounds), streamed from the CD

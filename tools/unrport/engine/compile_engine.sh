@@ -17,7 +17,7 @@ objs=()
 for f in "$work"/Src/*.cpp "$@"; do
   o="$work/obj/$(basename "${f%.cpp}").o"
   if [[ "$f" != "$work"/Src/* ]]; then
-    clang++ "${flags[@]}" -c "$f" -o "$o"  # extra sources are rebuilt every time
+    clang++ "${flags[@]}" ${LION_CXXDEFS:-} -c "$f" -o "$o"  # extra sources are rebuilt every time
   elif [[ ! -f "$o" ]]; then
     python3 -I "$here/../core/hoist_for.py" "$f" "${flags[@]}" >/dev/null
     clang++ "${flags[@]}" -c "$f" -o "$o"

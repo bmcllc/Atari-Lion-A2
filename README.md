@@ -162,6 +162,14 @@ iluminação de `Editor/`): `editor/LionMap.cpp` escava sete salas e corredores 
 as paredes com texturas procedurais (o repositório não tem texturas de parede), põe luzes estáticas, calcula as
 sombras por raios e povoa o mapa com monstros e itens do `UNreal.u`.
 
+Troca de mapas: a fase gerada termina numa luz verde na galeria nordeste; ao entrar nela o jogo viaja (`Browse`, o
+mesmo caminho do `open` e dos Teleporters do motor) para o mapa `NextMap` da seção `[Lion]` do `Lion.ini` (padrão:
+`Entry`, que é construído de novo; o nível antigo é descarregado e o heap volta a ~11 MB antes da nova construção).
+Mapas originais funcionam como são: `build.sh ... --start Mapa.unr --cdfile Mapa.unr` (mais os pacotes de texturas,
+sons e música, também com `--cdfile`) começa por esse mapa em vez de `Entry`, e só o `Entry` recebe o construtor.
+Os Teleporters e gatilhos do próprio mapa fazem a troca pelo motor. Não há mapas originais neste repositório, então
+o caminho foi testado com uma cópia do `Entry.unr` (nível carregado do CD sem o construtor) e com a recarga do `Entry`.
+
 Estado: o jogo `UNreal.SinglePlayer` carrega do CD em cerca de 20 s de tempo emulado, o jogador `MaleOne` nasce no mapa
 com o HUD e as armas do Unreal, e o jogo roda a 60 Hz com colisão, luz, som, combate com os monstros e entrada
 pelo controle. A tela mostra uma barra de carregamento vermelha enquanto o jogo é lido do CD. O jogo não está

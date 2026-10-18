@@ -234,6 +234,7 @@ void AddLights(ULevel* Level) {
       {960, 640, 100, 90, 30, 120, 14},   // gallery
       {960, 1150, 220, 135, 30, 110, 26},  // G
       {480, 1024, 100, 90, 30, 120, 14},  // corridor C-G
+      {960, 1330, 90, 200, 85, 255, 12},  // the exit (green)
   };
   UClass* LightClass = GObj.LoadClass(AActor::StaticClass, NULL, "Engine.Light", NULL, LOAD_NoFail | LOAD_KeepImports, NULL);
   for (INT i = 0; i < (INT)(sizeof(Lights) / sizeof(Lights[0])); ++i) {
