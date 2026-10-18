@@ -16,8 +16,9 @@ engine="$cache-engine"
 [[ -d "$cache/Inc" ]] || "$here/core/build_core.sh" "$src/Source/Core" "$cache"
 [[ -d "$engine/Inc" ]] || "$here/engine/build_engine.sh" "$src/Source/Engine" "$engine"
 render="$cache-render"; sound="$cache-sound"; lion="$cache-liondrv"; fire="$cache-fire"
-if [[ ! -d "$render/Inc" ]]; then  # Render needs no source patches beyond the for-scope fixes done by compile_pkg.sh
+if [[ ! -d "$render/Inc" ]]; then  # Render: smaller tables (patch_render.py), plus the for-scope fixes done by compile_pkg.sh
   mkdir -p "$render" && cp -r "$src/Source/Render/Inc" "$src/Source/Render/Src" "$render/"
+  python3 -I "$here/render/patch_render.py" "$render"
 fi
 if [[ ! -d "$fire/Inc" ]]; then  # procedural textures (fire, water, ice): C paths instead of x86 assembler
   mkdir -p "$fire" && cp -r "$src/Source/Fire/Inc" "$src/Source/Fire/Src" "$fire/"
@@ -71,9 +72,34 @@ PY
 clang++ --target=powerpc-unknown-none-elf -mcpu=7400 -O2 -ffreestanding -fno-exceptions -fno-rtti -c "$tmp/exports.cpp" -o "$tmp/exports.o"
 link "$tmp/exports.o"
 llvm-objcopy -O binary "$tmp/client.elf" "$tmp/client.bin"
+# The image (code, data, bss) must end below the log ring at 0x1F0000, where the RAM disc and heap's neighbours start.
+bss_end="$(llvm-size -A "$tmp/client.elf" | awk '$1 == ".bss" {print $3 + $2}')"
+if (( bss_end > 0x1F0000 )); then echo "build.sh: the client image ends at $(printf %x "$bss_end"), past the log ring (1F0000)" >&2; exit 1; fi
 
 scripts="$src/Unreal/Scripts"
-"${UNRPORT:-build/unrport}" "$map" "$tmp/client.bin" "$out" "${@:3}" \
-    --file "$here/Lion.ini" --file "$scripts/Core.u" --file "$scripts/Fire.u" --file "$scripts/IpDrv.u" \
-    --file "$src/Engine/Localization/Core.int" --file "$src/Engine/Localization/Engine.int" \
-    --cdfile "$scripts/Engine.u" --cdfile "$scripts/Editor.u" --cdfile "$scripts/UNreal.u"  # the game (37 MB: scripts, meshes, textures, sounds), streamed from the CD
+opts=("${@:3}")
+pack() {  # pack <out.iso> [extra unrport options]
+  local iso="$1"; shift
+  "${UNRPORT:-build/unrport}" "$map" "$tmp/client.bin" "$iso" "${opts[@]}" \
+      --file "$here/Lion.ini" --file "$scripts/Core.u" --file "$scripts/Fire.u" --file "$scripts/IpDrv.u" \
+      --file "$src/Engine/Localization/Core.int" --file "$src/Engine/Localization/Engine.int" \
+      --cdfile "$scripts/Engine.u" --cdfile "$scripts/Editor.u" --cdfile "$scripts/UNreal.u" "$@"
+}  # UNreal.u is the game (37 MB: scripts, meshes, textures, sounds), streamed from the CD
+
+# Loading reads the disc in chunks, and every seek costs ~100 ms. The client records which chunks it touches and in
+# which order; a second packing lays them out in that order (PRELOAD.BIN) so loading reads long runs instead. The
+# recording is a headless run of the first disc (cached next to the output; UNRPORT_RETRACE=1 redoes it).
+trace="${out%.iso}.trace"
+lion="${LION:-build/lion}"
+if [[ -x "$lion" && ( ! -f "$trace" || -n "${UNRPORT_RETRACE:-}" ) ]]; then
+  pack "$tmp/record.iso" > /dev/null
+  addr="$(llvm-nm "$tmp/client.elf" | awk '$3 == "g_cd_trace" {print $1}')"
+  "$lion" --headless --fast-boot --frames "${UNRPORT_TRACE_FRAMES:-22000}" --hold 8500:11 --hold 11000:15 --hold 14000:19 --hold 17000:11 \
+      --dump-ram "$tmp/trace.bin,$addr,10008" "$tmp/record.iso" > "$tmp/record.log" 2>&1 || true
+  cp "$tmp/trace.bin" "$trace"
+fi
+if [[ -f "$trace" ]]; then
+  pack "$out" --preload "$trace"
+else
+  pack "$out"
+fi

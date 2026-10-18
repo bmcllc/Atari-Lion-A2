@@ -86,6 +86,7 @@ static u32 g_in_use;
 static const char* g_tag_name[64];
 static int g_tag_bytes[64];
 static u32 g_tags = 1;
+static int g_cls_live[128];  // live blocks per size class (memory report)
 static u32 size_class(u32 n, u32* rounded) {
   if (n <= 256) { *rounded = (n + 15) & ~15u; return (*rounded >> 4) - 1; }
   const u32 msb = 31 - __builtin_clz(n - 1), step = 1u << (msb - 2);
@@ -96,12 +97,20 @@ static u32 size_class(u32 n, u32* rounded) {
 void lion_heap_stats(u32* used, u32* arena_left) { *used = g_in_use; *arena_left = kHeapEnd - g_bump; }
 u32 lion_heap_capacity() { return kHeapEnd - kHeapStart; }
 void* malloc(size_t n) {
+  if (n >= 400000) {  // big allocations: who asks? (return addresses up the stack)
+    u32* c1 = *(u32**)__builtin_frame_address(0);
+    u32* c2 = c1 ? *(u32**)c1 : 0;
+    u32* c3 = c2 ? *(u32**)c2 : 0;
+    char m[96];
+    sprintf(m, "bigalloc %u from %x %x %x %x", (u32)n, (u32)__builtin_return_address(0), c1 ? c1[1] : 0, c2 ? c2[1] : 0, c3 ? c3[1] : 0);
+    lion_log(m);
+  }
   u32 sz, cls = size_class(n ? (u32)n : 1, &sz);
   if (g_free[cls]) {
     Hdr* h = g_free[cls];
     g_free[cls] = *(Hdr**)(h + 1);
     h->size = (u32)n;
-    h->pad[0] = 0; g_tag_bytes[0] += (int)sz;
+    h->pad[0] = 0; g_tag_bytes[0] += (int)sz; ++g_cls_live[h->cls];
     g_in_use += sz;
     return h + 1;
   }
@@ -113,7 +122,7 @@ void* malloc(size_t n) {
         Hdr* h = g_free[c];
         g_free[c] = *(Hdr**)(h + 1);
         h->size = (u32)n;
-        h->pad[0] = 0; g_tag_bytes[0] += (int)sz;
+        h->pad[0] = 0; g_tag_bytes[0] += (int)sz; ++g_cls_live[h->cls];
         g_in_use += sz;
         return h + 1;
       }
@@ -125,7 +134,7 @@ void* malloc(size_t n) {
   g_bump += total;
   h->cls = cls;
   h->size = (u32)n;
-  h->pad[0] = 0; g_tag_bytes[0] += (int)sz;
+  h->pad[0] = 0; g_tag_bytes[0] += (int)sz; ++g_cls_live[h->cls];
   g_in_use += sz;
   return h + 1;
 }
@@ -136,6 +145,7 @@ void free(void* p) {
   size_class(h->size ? h->size : 1, &sz);
   g_in_use -= sz;
   g_tag_bytes[h->pad[0]] -= (int)sz;
+  --g_cls_live[h->cls];
   *(Hdr**)p = g_free[h->cls];
   g_free[h->cls] = h;
 }
@@ -167,6 +177,27 @@ static void retag(void* p, const char* tag) {
 }
 void* lion_malloc_tag(size_t n, const char* tag) { void* p = malloc(n); retag(p, tag); return p; }
 void* lion_realloc_tag(void* p, size_t n, const char* tag) { void* q = realloc(p, n); retag(q, tag); return q; }
+// The size classes holding the most live memory.
+void lion_class_report() {
+  char m[96];
+  static int done[128];
+  for (int c = 0; c < 128; ++c) done[c] = 0;
+  for (int r = 0; r < 12; ++r) {
+    int best = -1;
+    u32 best_bytes = 0;
+    for (int c = 0; c < 128; ++c) {
+      // The size of class c: invert size_class() by probing its first member size.
+      u32 sz = c < 16 ? (u32)(c + 1) * 16 : 0;
+      if (!sz) { const int k = c - 16, o = k / 4, st = k % 4; const u32 base = 1u << (o + 8); sz = base + (u32)(st + 1) * (base / 4); }
+      const u32 bytes = g_cls_live[c] > 0 ? (u32)g_cls_live[c] * sz : 0;
+      if (!done[c] && bytes > best_bytes) { best_bytes = bytes; best = c; }
+    }
+    if (best < 0 || best_bytes < 100000) break;
+    done[best] = 1;
+    sprintf(m, "heap class %d: %d blocks, %u KB", best, g_cls_live[best], best_bytes >> 10);
+    lion_log(m);
+  }
+}
 void lion_tag_report() {
   char m[96];
   for (u32 t = 0; t < g_tags; ++t)
@@ -359,23 +390,41 @@ long clock(void) { u32 tb; asm volatile("mftb %0" : "=r"(tb)); return (long)tb; 
 long time(long* t) { long v = clock() / 25000000; if (t) *t = v; return v; }
 
 // ---- stdio: the RAM disc first, then ISO9660 files streamed from the CD ----------------------------
-enum : u32 { kCd = 0x1F060000, kPic = 0x1F040000, kCdChunk = 16 * 2048, kCdSlots = 24 };
+enum : u32 { kCd = 0x1F060000, kPic = 0x1F040000, kCdChunk = 2 * 2048, kCdSlots = 128, kCdGroup = 32, kStageGroups = 2, kTraceMax = 4096 };
 struct _iobuf {
   const u8* data;  // RAM disc file, or NULL for a CD file
   long size, pos;
   u32 lba;         // first sector of a CD file
+  u32 id;          // hash of the file name (stable between builds, unlike the sector)
   bool used;
 };
 static _iobuf g_files[24];
-// CD read cache shared by all files: kCdSlots chunks of kCdChunk bytes, the least recently used replaced.
+// CD read cache shared by all files: kCdSlots chunks of kCdChunk bytes, the least recently used replaced. A chunk is
+// identified by the hash of its file name and its index, so the cache survives fclose/fopen.
 static u8* g_cd_chunks;
-static const _iobuf* g_slot_file[kCdSlots];
-static long g_slot_at[kCdSlots];
+static u32 g_slot_lba[kCdSlots];   // 0 = empty
+static u32 g_slot_chunk[kCdSlots];
 static u32 g_slot_age[kCdSlots], g_cd_age;
-static void init_file(_iobuf* f, const u8* data, long size, u32 lba) {
-  f->data = data; f->size = size; f->pos = 0; f->lba = lba; f->used = true;
-  for (u32 i = 0; i < kCdSlots; ++i)
-    if (g_slot_file[i] == f) g_slot_file[i] = 0;
+// Chunks that came in a prefetched run wait in a small staging area (two runs, the older one replaced) and move to
+// the per-chunk cache the moment the game touches them, so hot chunks stay and the rest of a run does not.
+static u8* g_stage;
+static u32 g_stage_lba[kStageGroups * kCdGroup], g_stage_chunk[kStageGroups * kCdGroup], g_stage_next;
+// Chunks in the order the game first touched them (file name hash, chunk index): build.sh records this once, and
+// unrport lays the chunks out in that order in PRELOAD.BIN (with PRELOAD.MAP naming them), so that loading reads the
+// disc in long sequential runs instead of one seek per chunk. 'extern' for the host: build.sh finds the symbol in the linked image.
+u32 g_cd_trace[2 + 4 * kTraceMax];  // count, (file, chunk) pairs, then the same for the chunks that were read again
+static bool g_pre_tried;
+static u32 g_pre_lba, g_pre_n;
+static u32* g_pre_ent;  // pairs: file id, chunk
+static u32 g_pre_hot;   // the first g_pre_hot entries are kept in memory (g_pin) all the time
+static u8* g_pin;
+static u32 name_hash(const char* s) {  // FNV-1a over the lower-case name
+  u32 h = 2166136261u;
+  for (; *s; ++s) { u32 c = (unsigned char)*s; if (c >= 'A' && c <= 'Z') c += 32; h = (h ^ c) * 16777619u; }
+  return h ? h : 1;
+}
+static void init_file(_iobuf* f, const u8* data, long size, u32 lba, u32 id = 0) {
+  f->data = data; f->size = size; f->pos = 0; f->lba = lba; f->id = id; f->used = true;
 }
 
 // Waits for the drive with the CPU dozing; the vblank/CD interrupt handler at 0x500 only acknowledges.
@@ -391,6 +440,7 @@ static bool cd_wait() {
   REG(kCd + 4) = 3;  // acknowledge
   return ok;
 }
+static u32 g_n_group, g_n_seen, g_n_unmapped;
 static bool cd_read(u32 lba, u32 count, void* dst) {
   static u32 reads, sectors;
   sectors += count;
@@ -412,11 +462,14 @@ static bool cd_read(u32 lba, u32 count, void* dst) {
     for (u32 y = 224; y < 232; ++y)
       for (u32 x = 10; x < 10 + w; ++x) fb[y * 320 + x] = 0xF800;  // red like the Lion
   }
+  static u32 next_lba, seq, near_, far_, prev_count;
+  if (lba == next_lba) ++seq; else if ((lba > next_lba ? lba - next_lba : next_lba - lba) < 2000) ++near_; else ++far_;
+  next_lba = lba + count;
   if (++reads % 100 == 0) {
-    char msg[96];
+    char msg[128];
     u32 tb;
     asm volatile("mftb %0" : "=r"(tb));
-    sprintf(msg, "cd: %u reads, %u sectors (%u KB), last lba %u, t=%u s", reads, sectors, sectors * 2, lba, tb / 25000000);
+    sprintf(msg, "cd: %u reads, %u sectors (%u KB), last lba %u, t=%u s, sequential %u near %u far %u (groups %u, seen %u, unmapped %u)", reads, sectors, sectors * 2, lba, tb / 25000000, seq, near_, far_, g_n_group, g_n_seen, g_n_unmapped);
     lion_log(msg);
   }
   REG(kCd + 8) = lba;
@@ -486,16 +539,99 @@ FILE* fopen(const char* path, const char* mode) {
     }
   u32 lba, size;
   if (!cd_find(base, &lba, &size)) return 0;
-  init_file(slot, 0, (long)size, lba);
+  init_file(slot, 0, (long)size, lba, name_hash(base));
   return slot;
 }
 int fclose(FILE* f) {
   if (!f) return 0;
-  for (u32 i = 0; i < kCdSlots; ++i)
-    if (g_slot_file[i] == f) g_slot_file[i] = 0;
   f->used = false;
   return 0;
 }
+// The preload map (see g_cd_trace), read from the disc the first time a chunk is missing.
+static void cd_load_preload() {
+  g_pre_tried = true;
+  u32 mlba, msize, blba, bsize;
+  if (!cd_find("PRELOAD.MAP", &mlba, &msize) || !cd_find("PRELOAD.BIN", &blba, &bsize)) return;
+  u8* raw = (u8*)malloc(((msize + 2047) & ~2047u) + 32);
+  u8* buf = (u8*)(((u32)raw + 31) & ~31u);
+  if (!cd_read(mlba, (msize + 2047) / 2048, buf) || ((u32*)buf)[0] != 0x50524C44 /* PRLD */) { free(raw); return; }
+  g_pre_n = ((u32*)buf)[1];
+  g_pre_hot = ((u32*)buf)[2];
+  g_pre_ent = (u32*)malloc(g_pre_n * 8);
+  memcpy(g_pre_ent, buf + 12, g_pre_n * 8);
+  g_pre_lba = blba;
+  free(raw);
+  if (g_pre_hot) {  // chunks the recorded load read again and again: read once, keep
+    u8* praw = (u8*)malloc(g_pre_hot * kCdChunk + 32);
+    g_pin = praw;
+    u8* pbase = (u8*)(((u32)praw + 31) & ~31u);
+    if (!cd_read(g_pre_lba, g_pre_hot * (kCdChunk / 2048u), pbase)) g_pre_hot = 0;
+    g_pin = pbase;
+  }
+  char msg[64];
+  sprintf(msg, "preload: %u chunks, %u kept", g_pre_n, g_pre_hot);
+  lion_log(msg);
+}
+
+// Brings a chunk of a CD file into the cache and returns its slot. A chunk named by the preload map is read
+// together with the chunks that follow it on the disc (one read into the staging area): the order is the one of
+// the recorded load, so those are the next chunks the game asks for.
+static int cd_fetch(_iobuf* f, u32 chunk, u8* base) {
+  if (!g_pre_tried) cd_load_preload();
+  bool seen = false;  // touched before: a chunk the cache let go, which is read alone
+  {  // record the first touch of each chunk
+    u32 n = g_cd_trace[0];
+    for (u32 i = 0; i < n && !seen; ++i) seen = g_cd_trace[1 + 2 * i] == f->id && g_cd_trace[2 + 2 * i] == chunk;
+    if (!seen && n < kTraceMax) { g_cd_trace[1 + 2 * n] = f->id; g_cd_trace[2 + 2 * n] = chunk; g_cd_trace[0] = n + 1; }
+    if (seen) {  // read again: a candidate for staying in memory
+      u32 h = g_cd_trace[1 + 2 * kTraceMax];
+      bool known = false;
+      for (u32 i = 0; i < h && !known; ++i) known = g_cd_trace[2 + 2 * kTraceMax + 2 * i] == f->id && g_cd_trace[3 + 2 * kTraceMax + 2 * i] == chunk;
+      if (!known && h < kTraceMax) { g_cd_trace[2 + 2 * kTraceMax + 2 * h] = f->id; g_cd_trace[3 + 2 * kTraceMax + 2 * h] = chunk; g_cd_trace[1 + 2 * kTraceMax] = h + 1; }
+    }
+  }
+  // The slot that will hold it: least recently used.
+  int slot = 0;
+  for (u32 i = 1; i < kCdSlots; ++i)
+    if (!g_slot_lba[i] || (g_slot_lba[slot] && g_slot_age[i] < g_slot_age[slot])) slot = (int)i;
+  g_slot_lba[slot] = 0;
+  u8* dst = base + slot * kCdChunk;
+  int from = -1;  // staged copy
+  for (u32 i = 0; i < kStageGroups * kCdGroup && from < 0; ++i)
+    if (g_stage_lba[i] == f->id && g_stage_chunk[i] == chunk) from = (int)i;
+  if (from < 0 && !seen) {
+    int p = -1;
+    for (u32 i = g_pre_hot; i < g_pre_n; ++i) if (g_pre_ent[2 * i] == f->id && g_pre_ent[2 * i + 1] == chunk) { p = (int)i; break; }
+    if (p >= 0) {
+      if (!g_stage) g_stage = (u8*)malloc(kStageGroups * kCdGroup * kCdChunk + 32);
+      u8* sbase = (u8*)(((u32)g_stage + 31) & ~31u);
+      const u32 g = g_stage_next++ % kStageGroups;
+      const u32 cnt = g_pre_n - (u32)p < kCdGroup ? g_pre_n - (u32)p : kCdGroup;
+      for (u32 j = 0; j < kCdGroup; ++j) g_stage_lba[g * kCdGroup + j] = 0;
+      if (!cd_read(g_pre_lba + (u32)p * (kCdChunk / 2048u), cnt * (kCdChunk / 2048u), sbase + g * kCdGroup * kCdChunk)) return -1;
+      for (u32 j = 0; j < cnt; ++j) {
+        g_stage_lba[g * kCdGroup + j] = g_pre_ent[2 * (p + j)];
+        g_stage_chunk[g * kCdGroup + j] = g_pre_ent[2 * (p + j) + 1];
+      }
+      from = (int)(g * kCdGroup);
+      ++g_n_group;
+    }
+  }
+  if (from >= 0) {
+    u8* sbase = (u8*)(((u32)g_stage + 31) & ~31u);
+    memcpy(dst, sbase + from * kCdChunk, kCdChunk);
+  } else {  // not in the map, or let go by the cache: read just this chunk
+    if (seen) ++g_n_seen; else ++g_n_unmapped;
+    
+    const long at = (long)chunk * kCdChunk, left = f->size - at;
+    const u32 sectors = (u32)((left < (long)kCdChunk ? left : (long)kCdChunk) + 2047) / 2048;
+    if (!cd_read(f->lba + chunk * (kCdChunk / 2048u), sectors, dst)) return -1;
+  }
+  g_slot_lba[slot] = f->id;
+  g_slot_chunk[slot] = chunk;
+  return slot;
+}
+
 size_t fread(void* p, size_t size, size_t n, FILE* f) {
   if (!f || !size) return 0;
   size_t have = (size_t)(f->size - f->pos) / size;
@@ -511,23 +647,27 @@ size_t fread(void* p, size_t size, size_t n, FILE* f) {
   u8* base = (u8*)(((u32)g_cd_chunks + 31) & ~31u);
   while (total) {
     const long at = f->pos & ~(long)(kCdChunk - 1);
-    int slot = -1;
-    for (u32 i = 0; i < kCdSlots; ++i) if (g_slot_file[i] == f && g_slot_at[i] == at) { slot = (int)i; break; }
-    if (slot < 0) {  // evict the least recently used chunk
-      slot = 0;
-      for (u32 i = 1; i < kCdSlots; ++i)
-        if (!g_slot_file[i] || (g_slot_file[slot] && g_slot_age[i] < g_slot_age[slot])) slot = (int)i;
-      const long left = f->size - at;
-      const u32 sectors = (u32)((left < (long)kCdChunk ? left : (long)kCdChunk) + 2047) / 2048;
-      g_slot_file[slot] = 0;
-      if (!cd_read(f->lba + (u32)(at / 2048), sectors, base + slot * kCdChunk)) return 0;
-      g_slot_file[slot] = f;
-      g_slot_at[slot] = at;
+    const u32 chunk = (u32)(at / kCdChunk);
+    static u32 last_id, last_chunk;  // most reads hit the chunk of the previous one
+    static const u8* last_src;
+    const u8* src = (last_src && last_id == f->id && last_chunk == chunk) ? last_src : 0;
+    for (u32 i = 0; !src && i < kCdSlots; ++i)
+      if (g_slot_lba[i] == f->id && g_slot_chunk[i] == chunk) { src = base + i * kCdChunk; g_slot_age[i] = ++g_cd_age; }
+    if (!src && g_pre_tried) {  // kept chunks
+      const u8* pbase = g_pin;
+      for (u32 i = 0; !src && i < g_pre_hot; ++i)
+        if (g_pre_ent[2 * i] == f->id && g_pre_ent[2 * i + 1] == chunk) src = pbase + i * kCdChunk;
     }
-    g_slot_age[slot] = ++g_cd_age;
+    if (!src) {
+      const int slot = cd_fetch(f, chunk, base);
+      if (slot < 0) return 0;
+      g_slot_age[slot] = ++g_cd_age;
+      src = base + slot * kCdChunk;
+    }
+    last_id = f->id; last_chunk = chunk; last_src = src;
     size_t take = (size_t)(at + (long)kCdChunk - f->pos);
     if (take > total) take = total;
-    memcpy(out, base + slot * kCdChunk + (f->pos - at), take);
+    memcpy(out, src + (f->pos - at), take);
     out += take;
     f->pos += (long)take;
     total -= take;

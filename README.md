@@ -162,7 +162,7 @@ iluminação de `Editor/`): `editor/LionMap.cpp` escava sete salas e corredores 
 as paredes com texturas procedurais (o repositório não tem texturas de parede), põe luzes estáticas, calcula as
 sombras por raios e povoa o mapa com monstros e itens do `UNreal.u`.
 
-Estado: o jogo `UNreal.SinglePlayer` carrega do CD em cerca de 80 s de tempo emulado, o jogador `MaleOne` nasce no mapa
+Estado: o jogo `UNreal.SinglePlayer` carrega do CD em cerca de 20 s de tempo emulado, o jogador `MaleOne` nasce no mapa
 com o HUD e as armas do Unreal, e o jogo roda a 60 Hz com colisão, luz, som, combate com os monstros e entrada
 pelo controle. A tela mostra uma barra de carregamento vermelha enquanto o jogo é lido do CD. O jogo não está
 completo: são sete salas e não as fases originais (que não estão no repositório), sem música e sem as sequências do
@@ -171,6 +171,13 @@ jogo original.
 Áudio: o firmware de mixagem do Tyke (24 vozes PCM16) toca os sons. Os sons ficam no CD (11 MB no `UNreal.u`): o
 motor só registra onde cada onda está no arquivo, e a primeira vez que um som toca ele é lido do CD, convertido para
 PCM16 mono e guardado num cache de 1 MB. Há atenuação por distância, pan estéreo e sons ambiente em loop.
+
+Tempo de carga: cada leitura do CD custa uns 100 ms de busca, e carregar o `UNreal.u` fazia mais de mil leituras
+espalhadas (cerca de 2 minutos). O `build.sh` agora roda o jogo uma vez no emulador (headless) para gravar quais blocos
+de 4 KB do disco o jogo toca e em que ordem (`g_cd_trace`, em `lionrt.cpp`), e o `unrport --preload` grava esses
+blocos em sequência no disco (`PRELOAD.BIN`, nomeados em `PRELOAD.MAP`): a carga passa a ler o disco em corridas de
+128 KB. Os blocos que a gravação leu várias vezes ficam fixos na RAM (cerca de 1,4 MB). O rastro fica em
+`build/<disco>.trace`; `UNRPORT_RETRACE=1` regrava.
 
 Memória e tempo: o heap tem 22 MB dos 24 MB (o jogo usa cerca de 19 MB); o `Engine.u` e o `Editor.u` vêm do CD, que tem
 um cache de blocos compartilhado. Quando o heap aperta, o jogo coleta lixo e esvazia o cache de áudio. O relógio do

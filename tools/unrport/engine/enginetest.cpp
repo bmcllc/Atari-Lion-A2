@@ -52,6 +52,7 @@ extern "C" void lion_engine_test() {
 
 // Memory census (a debugging aid): where the object heap goes, by kind.
 extern "C" void lion_tag_report();
+extern "C" void lion_class_report();
 extern "C" void lion_census(const char* Tag) {
   INT Tex = 0, TexBytes = 0, Meshes = 0, MeshBytes = 0, Funcs = 0, ScriptBytes = 0, Total = 0, Others = 0;
   for (FObjectIterator It; It; ++It) {
@@ -95,4 +96,5 @@ extern "C" void lion_census(const char* Tag) {
     Bytes[Best] = 0;
   }
   lion_tag_report();
+  lion_class_report();
 }

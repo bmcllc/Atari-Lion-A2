@@ -32,4 +32,7 @@ edit("UnBsp.cpp", sub("Trans->ForceOverflow(", "if(Trans) Trans->ForceOverflow("
 # instead (the per-texel ray trace of LightBspSurf does the occlusion), which needs no render pass.
 edit("UnShadow.cpp", sub("GEditor->Render->GetVisibleSurfs( Viewport, iSurfs );",
     "for( INT iCand=0; iCand<Level->Model->Surfs->Num(); iCand++ ) iSurfs.AddItem( iCand );"))
+# Two 64 KB selection tables that only the editor UI uses: the client image must stay below the log ring.
+edit("UnEdCsg.cpp", sub("BYTE GFlags1 [MAXWORD+1];", "BYTE GFlags1 [4096];"))
+edit("UnEdCsg.cpp", sub("BYTE GFlags2 [MAXWORD+1];", "BYTE GFlags2 [4096];"))
 print("patch_editor: ok")

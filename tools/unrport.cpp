@@ -283,6 +283,7 @@ int main(int argc, char** argv) {
   bool hollow = false;  // --hollow: turn the solid cube of the stock Entry map into a room
   std::vector<std::string> cd_files;     // --cdfile: files streamed from the CD (too big for the RAM disc)
   std::vector<std::string> extra_files;  // --file: more files for the RAM disc
+  std::string preload_path;              // --preload: access trace recorded by the client (see lionrt.cpp g_cd_trace)
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const int slot = a == "--wall" ? 0 : a == "--floor" ? 1 : a == "--ceiling" ? 2 : -1;
@@ -291,6 +292,7 @@ int main(int argc, char** argv) {
     else if (a == "--hollow") hollow = true;
     else if (a == "--cdfile" && i + 1 < argc) cd_files.push_back(argv[++i]);
     else if (a == "--file" && i + 1 < argc) extra_files.push_back(argv[++i]);
+    else if (a == "--preload" && i + 1 < argc) preload_path = argv[++i];
     else pos.push_back(a);
   }
   if (pos.size() != 3) {
@@ -411,6 +413,60 @@ int main(int argc, char** argv) {
       return 1;
     }
     iso_files.push_back(std::move(f));
+  }
+  if (!preload_path.empty()) {
+    // The chunks the client touched while loading, in the order it touched them (4 KB each), laid out one after
+    // the other: PRELOAD.BIN has the data and PRELOAD.MAP names each chunk by the hash of its file's name and its index.
+    constexpr size_t kChunk = 2 * 2048;
+    std::vector<u8> trace;
+    if (!lion::read_file(preload_path, &trace) || trace.size() < 4) {
+      std::fprintf(stderr, "unrport: cannot read %s\n", preload_path.c_str());
+      return 1;
+    }
+    auto rd32 = [&](size_t at) { return u32(trace[at]) << 24 | u32(trace[at + 1]) << 16 | u32(trace[at + 2]) << 8 | trace[at + 3]; };
+    auto name_hash = [](const std::string& name) {  // FNV-1a over the lower-case name, as in lionrt.cpp
+      u32 h = 2166136261u;
+      for (char ch : name) h = (h ^ u32(std::tolower(static_cast<unsigned char>(ch)))) * 16777619u;
+      return h ? h : 1u;
+    };
+    iso9660::File bin{"PRELOAD.BIN", {}}, map{"PRELOAD.MAP", {}};
+    std::vector<u8> entries;
+    // The trace: first touches in order, then the chunks that were read again. Those come first in the preload (the
+    // client keeps them in memory); the others follow in the order of their first touch.
+    constexpr size_t kTraceMax = 4096;
+    auto pair_at = [&](size_t index, bool hot) {
+      const size_t at = hot ? 8 + 8 * kTraceMax + 8 * index : 4 + 8 * index;
+      return std::pair<u32, u32>(rd32(at), rd32(at + 4));
+    };
+    std::vector<std::pair<u32, u32>> order;
+    std::vector<std::pair<u32, u32>> kept;
+    const u32 n = rd32(0), nhot = trace.size() >= 8 + 8 * kTraceMax ? rd32(4 + 8 * kTraceMax) : 0;
+    for (u32 i = 0; i < nhot && 12 + 8 * kTraceMax + 8 * size_t(i) <= trace.size(); ++i) kept.push_back(pair_at(i, true));
+    order = kept;
+    for (u32 i = 0; i < n && 4 + 8 * size_t(i) + 8 <= trace.size(); ++i)
+      if (std::find(kept.begin(), kept.end(), pair_at(i, false)) == kept.end()) order.push_back(pair_at(i, false));
+    u32 hot_written = 0;
+    for (size_t o = 0; o < order.size(); ++o) {
+      const u32 id = order[o].first, chunk = order[o].second;
+      for (size_t k = 1; k < iso_files.size(); ++k) {
+        const auto& file = iso_files[k];
+        if (name_hash(file.name) != id || size_t(chunk) * kChunk >= file.data.size()) continue;
+        const size_t from = size_t(chunk) * kChunk, take = std::min(kChunk, file.data.size() - from);
+        bin.data.insert(bin.data.end(), file.data.begin() + long(from), file.data.begin() + long(from + take));
+        bin.data.resize(bin.data.size() + (kChunk - take), 0);
+        for (int s = 24; s >= 0; s -= 8) entries.push_back(u8(id >> s));
+        for (int s = 24; s >= 0; s -= 8) entries.push_back(u8(chunk >> s));
+        if (o < kept.size()) ++hot_written;
+        break;
+      }
+    }
+    const u32 count = u32(entries.size() / 8);
+    for (u32 v : {0x50524C44u, count, hot_written})
+      for (int s = 24; s >= 0; s -= 8) map.data.push_back(u8(v >> s));
+    map.data.insert(map.data.end(), entries.begin(), entries.end());
+    std::printf("preload: %u chunks, %zu KB (%u kept in memory)\n", count, bin.data.size() / 1024, hot_written);
+    iso_files.push_back(std::move(map));
+    iso_files.push_back(std::move(bin));
   }
   const auto disc = iso9660::build("UNREAL", iso_files);
   FILE* f = std::fopen(pos[2].c_str(), "wb");
