@@ -173,12 +173,25 @@ o caminho foi testado com uma cópia do `Entry.unr` (nível carregado do CD sem 
 Estado: o jogo `UNreal.SinglePlayer` carrega do CD em cerca de 20 s de tempo emulado, o jogador `MaleOne` nasce no mapa
 com o HUD e as armas do Unreal, e o jogo roda a 60 Hz com colisão, luz, som, combate com os monstros e entrada
 pelo controle. A tela mostra uma barra de carregamento vermelha enquanto o jogo é lido do CD. O jogo não está
-completo: são sete salas e não as fases originais (que não estão no repositório), sem música e sem as sequências do
-jogo original.
+completo: são sete salas e não as fases originais (que não estão no repositório) e sem as sequências do jogo
+original. As músicas originais também não estão no repositório; o tocador de módulos está pronto (abaixo).
 
 Áudio: o firmware de mixagem do Tyke (24 vozes PCM16) toca os sons. Os sons ficam no CD (11 MB no `UNreal.u`): o
 motor só registra onde cada onda está no arquivo, e a primeira vez que um som toca ele é lido do CD, convertido para
 PCM16 mono e guardado num cache de 1 MB. Há atenuação por distância, pan estéreo e sons ambiente em loop.
+
+Música: os `.umx` do Unreal são módulos de tracker (MOD, S3M, XM e IT). `liondrv/LionMod.cpp` é um tocador completo
+desses quatro formatos (efeitos, envelopes de volume e pan, fade-out, loops com ping-pong, vibrato automático, ações de
+nota nova e descompressão IT214), independente do motor; o Tuffy mistura a 22 050 Hz (linear, com rampa de volume
+contra estalos) em dois anéis de 4096 amostras (esquerdo e direito) que duas vozes do Tyke (22 e 23) repetem em loop,
+reabastecidos a cada tick cerca de 2048 amostras à frente (os efeitos sonoros usam as outras 22 vozes). O motor não
+carrega os dados da música (`UMusic::Serialize` guarda só onde estão no arquivo); a música é lida do CD quando começa
+a tocar e solta quando outra assume. A música do nível vem do `Song` do jogador (como no jogo original); a música do
+nível gerado vem de `[Lion] Song=Pacote.Objeto` no `Lion.ini`: `build.sh ... --song Dig.Dig --cdfile Dig.umx`. O
+carregamento de um nível silencia a música e ela retoma sozinha. O tocador foi comparado com o libopenmpt (via
+`ffmpeg`) em módulos de teste gerados por `liondrv/test/genmods.py` (alturas e tempos iguais em MOD, S3M, XM e IT);
+`test/modtest.cpp` toca um módulo no PC e `test/mkumx.py` embrulha um módulo num pacote `.umx`. O `lion --wav` grava a
+saída do Tyke de uma execução sem tela.
 
 Tempo de carga: cada leitura do CD custa uns 100 ms de busca, e carregar o `UNreal.u` fazia mais de mil leituras
 espalhadas (cerca de 2 minutos). O `build.sh` agora roda o jogo uma vez no emulador (headless) para gravar quais blocos

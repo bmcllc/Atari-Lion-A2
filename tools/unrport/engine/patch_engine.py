@@ -37,6 +37,8 @@ edit("Src/UnReach.cpp", lambda t: t.replace("inline int FReachSpec::supports", "
 # OriginalSize, until RegisterSound takes them over.
 edit("Src/UnAudio.cpp", lambda t: t.replace("\t\tAr << Data;\n\t\tif( Ar.IsLoading() )\n\t\t{\n\t\t\t// Derive these from the exposed",
     "\t\tif( Ar.IsLoading() )\n\t\t{\n\t\t\tINT SkipCount = 0;\n\t\t\tAr << AR_INDEX(SkipCount);\n\t\t\tHandle = (void*)(DWORD)Ar.Tell();\n\t\t\tAr.Seek( Ar.Tell() + SkipCount );\n\t\t\tOriginalSize = SkipCount;\n\t\t\treturn;\n\t\t}\n\t\tAr << Data;\n\t\tif( Ar.IsLoading() )\n\t\t{\n\t\t\t// Derive these from the exposed", 1))
+# Music is skipped like sounds: the module is read from the disc when the song starts (see LionAudio.cpp).
+edit("Src/UnAudio.cpp", lambda t: t.replace("\t\tAr << Data;\n\t\tif( Ar.IsLoading() )\n\t\t\tOriginalSize = Data.Num();", "\t\tif( Ar.IsLoading() )\n\t\t{\n\t\t\tINT SkipCount = 0;\n\t\t\tAr << AR_INDEX(SkipCount);\n\t\t\tHandle = (void*)(DWORD)Ar.Tell();\n\t\t\tAr.Seek( Ar.Tell() + SkipCount );\n\t\t\tOriginalSize = SkipCount;\n\t\t\treturn;\n\t\t}\n\t\tAr << Data;", 1))
 # The temporary camera that the editor's lighting code opens is spawned with a role other than authority.
 edit("Src/UnLevAct.cpp", lambda t: t.replace("\tcheck(Actor->Role==ROLE_Authority);\n", "\t// (lion) view actors of editor cameras are not authoritative\n", 1))
 # Textures cost 8 MB of the 22 MB heap; the engine already has a "low detail textures" mode that drops the top

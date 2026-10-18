@@ -3,7 +3,7 @@
 # and a bootable disc from a .unr map.
 #   UNREAL_SRC=path/to/UnrealEngine tools/unrport/build.sh Map.unr out.iso \
 #       [--wall P.utx:Name] [--floor P.utx:Name] [--ceiling P.utx:Name] [--gain N] \
-#       [--start Name.unr] [--cdfile Other.unr]...
+#       [--start Name.unr] [--next Name.unr] [--song Package.Object] [--cdfile Other.unr]...
 # Without --start the game begins in the stock Entry level, which the client fills with a level built on the device.
 # --start makes another map (put on the disc with --cdfile, together with its textures/sounds/music packages) the first
 # level; maps are played as they are, and travel between them is the engine's (Teleporters, triggers, "open").
@@ -49,7 +49,7 @@ incs="$engine/Inc:$cache/Inc:$cache/Src"
 "$here/engine/compile_pkg.sh" SoundDrv "$sound" "$incs"
 "$here/engine/compile_pkg.sh" Fire "$fire" "$incs"
 "$here/engine/compile_pkg.sh" Editor "$editor" "$incs:$render/Inc" "$here/editor/LionEditor.cpp" "$here/editor/LionMap.cpp"
-"$here/engine/compile_pkg.sh" LionDrv "$lion" "$incs:$here/liondrv" "$here/liondrv/LionDrv.cpp" "$here/liondrv/LionRenDev.cpp" "$here/liondrv/LionAudio.cpp"
+"$here/engine/compile_pkg.sh" LionDrv "$lion" "$incs:$here/liondrv" "$here/liondrv/LionDrv.cpp" "$here/liondrv/LionRenDev.cpp" "$here/liondrv/LionAudio.cpp" "$here/liondrv/LionMod.cpp"
 clang --target=powerpc-unknown-none-elf -c "$here/crt0.S" -o "$tmp/crt0.o"
 
 link() {
@@ -83,13 +83,23 @@ if (( bss_end > 0x1F0000 )); then echo "build.sh: the client image ends at $(pri
 scripts="$src/Unreal/Scripts"
 opts=("${@:3}")
 ini="$here/Lion.ini"
-for ((i = 0; i < ${#opts[@]}; i++)); do  # --start Name.unr: the first level
-  if [[ "${opts[i]}" == --start ]]; then
-    ini="$tmp/Lion.ini"
-    sed "s/^LocalMap=.*/LocalMap=${opts[i+1]}/" "$here/Lion.ini" > "$ini"
-    unset 'opts[i]' 'opts[i+1]'; opts=("${opts[@]}"); break
-  fi
+extra_ini=()
+for ((i = 0; i < ${#opts[@]}; i++)); do  # --start Name.unr / --song Package.Object / --next Map.unr go to Lion.ini
+  case "${opts[i]}" in
+    --start) extra_ini+=("start=${opts[i+1]}"); unset 'opts[i]' 'opts[i+1]'; i=$((i+1)) ;;
+    --song) extra_ini+=("Song=${opts[i+1]}"); unset 'opts[i]' 'opts[i+1]'; i=$((i+1)) ;;
+    --next) extra_ini+=("NextMap=${opts[i+1]}"); unset 'opts[i]' 'opts[i+1]'; i=$((i+1)) ;;
+  esac
 done
+opts=("${opts[@]}")
+if ((${#extra_ini[@]})); then
+  ini="$tmp/Lion.ini"
+  cp "$here/Lion.ini" "$ini"
+  printf '\n[Lion]\n' >> "$ini"
+  for kv in "${extra_ini[@]}"; do
+    if [[ "$kv" == start=* ]]; then sed -i "s/^LocalMap=.*/LocalMap=${kv#start=}/" "$ini"; else echo "$kv" >> "$ini"; fi
+  done
+fi
 pack() {  # pack <out.iso> [extra unrport options]
   local iso="$1"; shift
   "${UNRPORT:-build/unrport}" "$map" "$tmp/client.bin" "$iso" "${opts[@]}" \

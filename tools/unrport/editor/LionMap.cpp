@@ -356,6 +356,25 @@ void LionBuildMap(UGameEngine* Engine) {
     if (P) Level->FarMoveActor(P, FVector(0, 0, 40), 1, 1);
   }
   Populate(Level);
+  // The level's song: "Package.Object" under [Lion] Song= in Lion.ini (a .umx on the disc), if any.
+  char SongName[96];
+  if (GetConfigString("Lion", "Song", SongName, sizeof(SongName)) && SongName[0]) {
+    char* Dot = appStrchr(SongName, '.');
+    if (Dot) {
+      *Dot = 0;
+      UMusic* Song = LoadObject<UMusic>(NULL, Dot + 1, SongName, LOAD_NoWarn | LOAD_KeepImports, NULL);
+      if (Song) {
+        Level->GetLevelInfo()->Song = Song;
+        Level->GetLevelInfo()->SongSection = 255;
+        for (INT i = 0; i < Engine->Client->Viewports.Num(); ++i)
+          if (Engine->Client->Viewports(i)->Actor) {
+            Engine->Client->Viewports(i)->Actor->Song = Song;
+            Engine->Client->Viewports(i)->Actor->SongSection = 255;
+          }
+        debugf("map: song %s.%s", SongName, Song->GetName());
+      } else debugf("map: cannot load song %s.%s", SongName, Dot + 1);
+    }
+  }
   Mem("populated");
   // Give back what the build left behind: unused scratch chunks and unreferenced objects.
   GMem.Exit();  // frees the chunks every FMemStack has returned (the list is shared)

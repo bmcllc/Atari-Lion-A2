@@ -6,14 +6,19 @@
 // converts it to mono PCM16 and keeps it in a cache of a few megabytes (least recently used evicted).
 #include "Inc_LionDrv.h"
 #include "UnLinker.h"
+#include "LionMod.h"
 
 namespace {
 
-enum { kTyke = 0x1F020000, kVoices = 24, kCacheBytes = 1 << 20, kMaxBufs = 96, kAmbientSlot = 7 };
+// Voices 0..21 play sound effects; 22 and 23 (left and right) loop the ring buffers the module player fills.
+enum {
+  kTyke = 0x1F020000, kVoices = 22, kMusicL = 22, kMusicR = 23, kCacheBytes = 1 << 20, kMaxBufs = 96, kAmbientSlot = 7,
+  kMusicRate = 22050, kRingFrames = 4096, kMusicAhead = 2048, kMaxSong = 3 << 19
+};
 
 inline volatile DWORD* TykeReg(DWORD Offset) { return (volatile DWORD*)(kTyke + Offset); }
 inline volatile DWORD* VoiceReg(INT Ch, DWORD Reg) { return TykeReg(0x100 + 0x20 * Ch + Reg); }
-enum { RStart = 0, RLength = 4, RLoop = 8, RPitch = 12, RVolume = 16, RCtrl = 20 };
+enum { RStart = 0, RLength = 4, RLoop = 8, RPitch = 12, RVolume = 16, RCtrl = 20, RPos = 24 };
 
 struct SoundInfo {
   DWORD Offset, Size;
@@ -186,6 +191,128 @@ void Mix(INT Ch, const FCoords* Listener) {
   *VoiceReg(Ch, RVolume) = ((DWORD)Li << 16) | (DWORD)Ri;
 }
 
+
+// Music: a tracker module (the .umx files of the game) rendered by the Tuffy into two ring buffers (left, right)
+// that the Tyke loops. The song's bytes stay on the disc like sounds do and are read when the song starts.
+struct MusicState {
+  lionmod::Player* P;
+  UMusic* Song;
+  BYTE Section;
+  SWORD* Ring[2];
+  INT Write;      // next frame to render
+  UBOOL Muted;    // the level is loading
+  INT Volume;     // 0..256
+} GMusic;
+
+SoundInfo* MusicInfoOf(UMusic* Song) {  // as InfoOf for sounds
+  if (Song->OriginalSize > 0) {
+    SoundInfo* Info = (SoundInfo*)appMalloc(sizeof(SoundInfo), "sndinfo");
+    Info->Offset = (DWORD)Song->Handle;
+    Info->Size = (DWORD)Song->OriginalSize;
+    appStrcpy(Info->File, "Music.umx");
+    if (ULinkerLoad* Linker = Song->GetLinker()) {
+      appStrncpy(Info->File, Linker->LinkerRoot->GetName(), 16);
+      appStrcat(Info->File, ".umx");
+    }
+    Song->Handle = Info;
+    Song->OriginalSize = 0;
+  }
+  return (SoundInfo*)Song->Handle;
+}
+
+void MusicSetVolume(INT V) {
+  *VoiceReg(kMusicL, RVolume) = (DWORD)V << 16;
+  *VoiceReg(kMusicR, RVolume) = (DWORD)V;
+}
+
+void MusicStop() {
+  *VoiceReg(kMusicL, RCtrl) = 0;
+  *VoiceReg(kMusicR, RCtrl) = 0;
+  if (GMusic.P) { delete GMusic.P; GMusic.P = NULL; }
+  GMusic.Song = NULL;
+}
+
+// Renders `Frames` frames at the write position.
+void MusicRender(INT Frames) {
+  static SWORD L[kMusicAhead], R[kMusicAhead];
+  while (Frames > 0) {
+    const INT N = Frames > kMusicAhead ? kMusicAhead : Frames;
+    GMusic.P->Render(L, R, N);
+    for (INT i = 0; i < N; ++i) {
+      const INT At = (GMusic.Write + i) & (kRingFrames - 1);
+      GMusic.Ring[0][At] = L[i];
+      GMusic.Ring[1][At] = R[i];
+    }
+    GMusic.Write = (GMusic.Write + N) & (kRingFrames - 1);
+    Frames -= N;
+  }
+}
+
+void MusicStart(UMusic* Song, BYTE Section) {
+  MusicStop();
+  GMusic.Song = Song;
+  GMusic.Section = Section;
+  SoundInfo* Info = MusicInfoOf(Song);
+  if (!Info || Info->Size < 64 || Info->Size > kMaxSong) { debugf("music: %s unusable", Song->GetName()); return; }
+  if (!GFile || appStricmp(GFileName, Info->File)) {
+    if (GFile) appFclose(GFile);
+    GFile = appFopen(Info->File, "rb");
+    appStrcpy(GFileName, Info->File);
+    if (!GFile) { debugf("music: cannot open %s", Info->File); return; }
+  }
+  BYTE* Raw = (BYTE*)appMalloc(Info->Size, "song");
+  if (!Raw) return;
+  appFseek(GFile, Info->Offset, 0);
+  if (appFread(Raw, 1, Info->Size, GFile) != (INT)Info->Size) { appFree(Raw); return; }
+  GMusic.P = new lionmod::Player;
+  if (!GMusic.P->Load(Raw, Info->Size, kMusicRate)) {  // the player owns Raw
+    debugf("music: %s is not a module I can play", Song->GetName());
+    delete GMusic.P;
+    GMusic.P = NULL;
+    return;
+  }
+  GMusic.P->Start(Section == 255 ? 0 : Section);
+  if (!GMusic.Ring[0]) {
+    GMusic.Ring[0] = (SWORD*)appMalloc(kRingFrames * 2, "ring");
+    GMusic.Ring[1] = (SWORD*)appMalloc(kRingFrames * 2, "ring");
+  }
+  appMemset(GMusic.Ring[0], 0, kRingFrames * 2);
+  appMemset(GMusic.Ring[1], 0, kRingFrames * 2);
+  GMusic.Write = 0;
+  MusicRender(kMusicAhead);
+  for (INT c = 0; c < 2; ++c) {
+    const INT Ch = c ? kMusicR : kMusicL;
+    *VoiceReg(Ch, RStart) = (DWORD)GMusic.Ring[c];
+    *VoiceReg(Ch, RLength) = kRingFrames;
+    *VoiceReg(Ch, RLoop) = 0;
+    *VoiceReg(Ch, RPitch) = (DWORD)((FLOAT)kMusicRate * 65536.0f / 44100.0f);
+  }
+  GMusic.Volume = 150;
+  MusicSetVolume(GMusic.Volume);
+  *VoiceReg(kMusicL, RCtrl) = 3;
+  *VoiceReg(kMusicR, RCtrl) = 3;
+  GMusic.Muted = 0;
+  debugf("music: %s (%s, %i channels, %i orders, %i bytes) from order %i", Song->GetName(), GMusic.P->Format(), GMusic.P->Channels(), GMusic.P->Orders(), (INT)Info->Size, (INT)Section);
+}
+
+// Follows the viewer's song and keeps the ring buffers filled a few frames ahead of the Tyke.
+void MusicUpdate(UViewport* Viewport) {
+  UMusic* Want = Viewport && Viewport->Actor ? Viewport->Actor->Song : NULL;
+  const BYTE Section = Viewport && Viewport->Actor ? Viewport->Actor->SongSection : 0;
+  if (!Want) { if (GMusic.Song) MusicStop(); return; }
+  if (Want != GMusic.Song || Section != GMusic.Section) { MusicStart(Want, Section); return; }
+  if (!GMusic.P) return;
+  const INT Pos = (INT)(*VoiceReg(kMusicL, RPos) & (kRingFrames - 1));
+  if (GMusic.Muted) {  // the level finished loading: the buffer is stale, start over from here
+    GMusic.Write = (Pos + 1024) & (kRingFrames - 1);
+    GMusic.Muted = 0;
+    MusicSetVolume(GMusic.Volume);
+  }
+  INT Ahead = (GMusic.Write - Pos) & (kRingFrames - 1);
+  if (Ahead > kRingFrames * 3 / 4) { GMusic.Write = (Pos + 1024) & (kRingFrames - 1); Ahead = 1024; }  // underrun
+  if (Ahead < kMusicAhead) MusicRender(kMusicAhead - Ahead);
+}
+
 }  // namespace
 
 ULionAudioSubsystem::ULionAudioSubsystem() : Viewport(NULL), Ticks(0) {}
@@ -199,10 +326,19 @@ UBOOL ULionAudioSubsystem::Init() {
   return 1;
 }
 
-void ULionAudioSubsystem::SetViewport(UViewport* InViewport) { Viewport = InViewport; }
+void ULionAudioSubsystem::SetViewport(UViewport* InViewport) {
+  Viewport = InViewport;
+  if (GMusic.P && !GMusic.Muted) { GMusic.Muted = 1; MusicSetVolume(0); }  // a level is loading: the ring cannot be refilled
+}
 UBOOL ULionAudioSubsystem::Exec(const char*, FOutputDevice*) { return 0; }
 
 void ULionAudioSubsystem::RegisterSound(USound*) {}
+
+void ULionAudioSubsystem::UnregisterMusic(UMusic* Music) {
+  if (Music == GMusic.Song) MusicStop();
+  if (Music->OriginalSize == 0 && Music->Handle) appFree(Music->Handle);
+  Music->Handle = NULL;
+}
 
 void ULionAudioSubsystem::UnregisterSound(USound* Sound) {
   for (INT i = 0; i < kMaxBufs; ++i)
@@ -271,6 +407,7 @@ UBOOL ULionAudioSubsystem::PlaySound(AActor* Actor, INT Id, USound* Sound, FVect
 void ULionAudioSubsystem::Update(FPointRegion, FCoords& Listener) {
   ++Ticks;
   GTick = Ticks;
+  MusicUpdate(Viewport);
   for (INT i = 0; i < kVoices; ++i) {
     if (!GVoices[i].B) continue;
     if (!VoiceBusy(i)) { GVoices[i].B = NULL; GVoices[i].Actor = NULL; continue; }

@@ -27,6 +27,7 @@ struct Options {
   std::string dump_ram;  // file,hexaddr,hexlen
   std::vector<std::pair<long, u32>> holds;  // --hold FRAME:HEXMASK[:LX:LY]: controller state from that frame on
   std::vector<std::array<u8, 2>> hold_sticks;
+  std::string wav;       // --wav file: headless runs write the Tyke's output as a 16-bit stereo WAV
   std::string until_log;  // --until-log A|B: headless run ends when the guest log contains A or B
   bool headless = false;
   int scale = 2;
@@ -37,7 +38,7 @@ void usage() {
   std::fprintf(stderr,
                "usage: lion [image.lion | disc.iso] [--frames N] [--dump out.ppm] [--dump-ram file,addr,len] [--hold frame:mask[:lx:ly]] [--headless]\n"
                "            [--verbose] [--trace-tuffy] [--trace-quacker] [--scale N] [--strict-7400]\n"
-               "            [--fast-boot] [--until-log TEXT|TEXT]\n"
+               "            [--fast-boot] [--until-log TEXT|TEXT] [--wav out.wav]\n"
                "With no image, the console starts its dashboard with an empty CD drive.\n"
                "--fast-boot straps the board as a development unit: no intro, discs boot at once.\n");
 }
@@ -104,6 +105,7 @@ void poll_controller(SDL_GameController* gc, lion::Pads::State& s) {
 int run_headless(lion::Lion& sys, const Options& opt) {
   const long frames = opt.frames < 0 ? 60 : opt.frames;
   const auto t0 = std::chrono::steady_clock::now();
+  std::vector<int16_t> wav;
   for (long i = 0; i < frames; ++i) {
     for (size_t h = 0; h < opt.holds.size(); ++h)
       if (opt.holds[h].first == i) {
@@ -114,6 +116,7 @@ int run_headless(lion::Lion& sys, const Options& opt) {
         p.ly = opt.hold_sticks[h][1];
       }
     sys.run_frame();
+    if (!opt.wav.empty()) wav.insert(wav.end(), sys.audio.begin(), sys.audio.end());
     sys.audio.clear();
     if (!opt.until_log.empty() && sys.tuffy.illegal_count > 0) {  // a guest crash ends the run too
       std::printf("until-log: Tuffy fault after %ld frames: first illegal opcode at PC=%08X LR=%08X SP=%08X\n", i + 1,
@@ -136,6 +139,19 @@ int run_headless(lion::Lion& sys, const Options& opt) {
           break;
         }
       }
+  }
+  if (!opt.wav.empty()) {
+    if (FILE* f = std::fopen(opt.wav.c_str(), "wb")) {
+      const uint32_t bytes = uint32_t(wav.size() * 2), rate = lion::kAudioRate, byte_rate = rate * 4, riff = 36 + bytes, fmt = 16;
+      const uint16_t pcm = 1, ch = 2, align = 4, bits = 16;
+      std::fwrite("RIFF", 1, 4, f); std::fwrite(&riff, 4, 1, f); std::fwrite("WAVEfmt ", 1, 8, f);
+      std::fwrite(&fmt, 4, 1, f); std::fwrite(&pcm, 2, 1, f); std::fwrite(&ch, 2, 1, f); std::fwrite(&rate, 4, 1, f);
+      std::fwrite(&byte_rate, 4, 1, f); std::fwrite(&align, 2, 1, f); std::fwrite(&bits, 2, 1, f);
+      std::fwrite("data", 1, 4, f); std::fwrite(&bytes, 4, 1, f);
+      std::fwrite(wav.data(), 2, wav.size(), f);
+      std::fclose(f);
+      std::printf("wrote %s (%zu stereo frames)\n", opt.wav.c_str(), wav.size() / 2);
+    }
   }
   const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   std::printf("%ld frames in %.2fs (%.0f%% of real time)\n", frames, secs,
@@ -198,6 +214,7 @@ int main(int argc, char** argv) {
       opt.headless = true;
     }
     else if (a == "--until-log") opt.until_log = next(), opt.headless = true;
+    else if (a == "--wav") opt.wav = next(), opt.headless = true;
     else if (a == "--headless") opt.headless = true;
     else if (a == "--verbose") lion::g_verbose = true;
     else if (a == "--scale") opt.scale = std::max(1, std::atoi(next()));

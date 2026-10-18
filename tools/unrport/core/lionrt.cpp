@@ -806,6 +806,39 @@ void _Unwind_Resume(void*) { lion_halt("unwind"); }
 int __gxx_personality_v0(...) { return 0; }
 void __cxa_pure_virtual() { lion_halt("pure virtual"); }
 
+
+// 64-bit integer division and conversions (the compiler's runtime library is not linked).
+unsigned long long __udivmoddi4(unsigned long long n, unsigned long long d, unsigned long long* rem) {
+  unsigned long long q = 0, r = 0;
+  if (d == 0) { if (rem) *rem = 0; return 0; }
+  for (int i = 63; i >= 0; --i) {
+    r = (r << 1) | ((n >> i) & 1);
+    if (r >= d) { r -= d; q |= 1ull << i; }
+  }
+  if (rem) *rem = r;
+  return q;
+}
+unsigned long long __udivdi3(unsigned long long n, unsigned long long d) { return __udivmoddi4(n, d, 0); }
+unsigned long long __umoddi3(unsigned long long n, unsigned long long d) { unsigned long long r; __udivmoddi4(n, d, &r); return r; }
+long long __divdi3(long long n, long long d) {
+  const bool neg = (n < 0) != (d < 0);
+  const unsigned long long q = __udivmoddi4(n < 0 ? -(unsigned long long)n : n, d < 0 ? -(unsigned long long)d : d, 0);
+  return neg ? -(long long)q : (long long)q;
+}
+long long __moddi3(long long n, long long d) {
+  unsigned long long r;
+  __udivmoddi4(n < 0 ? -(unsigned long long)n : n, d < 0 ? -(unsigned long long)d : d, &r);
+  return n < 0 ? -(long long)r : (long long)r;
+}
+double __floatundidf(unsigned long long v) { return (double)(unsigned)(v >> 32) * 4294967296.0 + (double)(unsigned)v; }
+double __floatdidf(long long v) { return v < 0 ? -__floatundidf(-(unsigned long long)v) : __floatundidf((unsigned long long)v); }
+unsigned long long __fixunsdfdi(double d) {
+  if (d <= 0) return 0;
+  const unsigned hi = (unsigned)(d / 4294967296.0);
+  return ((unsigned long long)hi << 32) | (unsigned)(d - (double)hi * 4294967296.0);
+}
+long long __fixdfdi(double d) { return d < 0 ? -(long long)__fixunsdfdi(-d) : (long long)__fixunsdfdi(d); }
+
 // Runs the static constructors (the Unreal class registry is built from them).
 typedef void (*Ctor)();
 extern Ctor __init_array_start[], __init_array_end[];

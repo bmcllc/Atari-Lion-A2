@@ -89,7 +89,7 @@ class LIONDRV_API ULionAudioSubsystem : public UAudioSubsystem {
   void RegisterMusic(UMusic*) {}
   void RegisterSound(USound* Sound);
   void UnregisterSound(USound* Sound);
-  void UnregisterMusic(UMusic*) {}
+  void UnregisterMusic(UMusic* Music);
   UBOOL PlaySound(AActor* Actor, INT Id, USound* Sound, FVector Location, FLOAT Volume, FLOAT Radius, FLOAT Pitch);
   void NoteDestroy(AActor* Actor);
   UBOOL GetLowQualitySetting() { return 1; }
