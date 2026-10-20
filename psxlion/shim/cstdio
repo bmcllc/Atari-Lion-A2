@@ -1,0 +1,2 @@
+#include <stdio.h>
+namespace std { using ::fprintf; }

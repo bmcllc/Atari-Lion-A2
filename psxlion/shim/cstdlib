@@ -1,0 +1,2 @@
+#include <stdlib.h>
+namespace std { using ::atoi; using ::calloc; using ::exit; using ::getenv; }
