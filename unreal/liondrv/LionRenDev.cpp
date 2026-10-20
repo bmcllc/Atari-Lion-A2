@@ -12,7 +12,7 @@
 #define VI_STRIDE (*(volatile DWORD*)0x1F030008)
 #define VI_FRAME (*(volatile DWORD*)0x1F030010)
 
-enum { OP_SET_TARGET = 1, OP_CLEAR = 2, OP_SET_MODE = 3, OP_SET_TEXTURE = 4, OP_TRI = 5, OP_SYNC = 6 };
+enum { OP_SET_TARGET = 1, OP_CLEAR = 2, OP_SET_MODE = 3, OP_SET_TEXTURE = 4, OP_TRI = 5, OP_SYNC = 6, OP_QUAD = 7 };
 enum {
   M_ZTEST = 1, M_ZWRITE = 2, M_GOURAUD = 4, M_TEXTURE = 8, M_BILINEAR = 16, M_PERSP = 32, M_BLEND = 64,
   M_MIPMAP = 256, M_TRILINEAR = 512, M_BLENDADD = 1024, M_COLORKEY = 2048
@@ -135,6 +135,15 @@ static inline void EmitVertex(const FLionVertex& V) {
 static inline void EmitTri(const FLionVertex& A, const FLionVertex& B, const FLionVertex& C) {
   Put(OP_TRI << 24 | 21);
   EmitVertex(A); EmitVertex(B); EmitVertex(C);
+}
+// A quad A B C D (triangles ABC and ACD) whose corners share depth, 1/w and colour: 19 words instead of 42.
+static inline void EmitQuad(const FLionVertex& A, const FLionVertex& B, const FLionVertex& C, const FLionVertex& D) {
+  Put(OP_QUAD << 24 | 19);
+  Put(Bits(A.X)); Put(Bits(A.Y)); Put(Bits(A.U)); Put(Bits(A.V));
+  Put(Bits(B.X)); Put(Bits(B.Y)); Put(Bits(B.U)); Put(Bits(B.V));
+  Put(Bits(C.X)); Put(Bits(C.Y)); Put(Bits(C.U)); Put(Bits(C.V));
+  Put(Bits(D.X)); Put(Bits(D.Y)); Put(Bits(D.U)); Put(Bits(D.V));
+  Put(Bits(A.Z)); Put(Bits(A.RW)); Put(A.Argb);
 }
 
 // Depth for the Z buffer: 0 at the near plane, 1 at the far plane, linear in screen space after the divide.
@@ -289,7 +298,7 @@ static void EmitLit(const FSurfaceDraw& D, const FLitVertex& V0, const FLitVerte
     const FLOAT L = Max(Abs(A.U - B.U), Abs(A.V - B.V));
     if (L > MaxEdge) { MaxEdge = L; Longest = e; }
   }
-  if (MaxEdge > 3.0f * D.Light->UScale && Level < 6) {
+  if (MaxEdge > 8.0f * D.Light->UScale && Level < 6) {
     const FLitVertex &A = *P[Longest], &B = *P[(Longest + 1) % 3], &C = *P[(Longest + 2) % 3];
     FLitVertex M;
     M.P = (A.P + B.P) * 0.5f;
@@ -389,8 +398,7 @@ void ULionRenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLOAT X,
   const FLOAT U1 = Tex ? (U + UL) * Tex->InvW : 0, V1 = Tex ? (V + VL) * Tex->InvH : 0;
   FLionVertex A = {X, Y, Zd, Rw, Argb, U0, V0}, B = {X + XL, Y, Zd, Rw, Argb, U1, V0};
   FLionVertex C = {X + XL, Y + YL, Zd, Rw, Argb, U1, V1}, D = {X, Y + YL, Zd, Rw, Argb, U0, V1};
-  EmitTri(A, B, C);
-  EmitTri(A, C, D);
+  EmitQuad(A, B, C, D);
 }
 
 void ULionRenderDevice::Draw2DLine(FSceneNode* Frame, FPlane Color, DWORD LineFlags, FVector P1, FVector P2) {
@@ -402,8 +410,7 @@ void ULionRenderDevice::Draw2DLine(FSceneNode* Frame, FPlane Color, DWORD LineFl
   const DWORD Argb = PackColor(Color.X, Color.Y, Color.Z, 1.0f);
   FLionVertex A = {P1.X + Nx, P1.Y + Ny, 0, 1, Argb, 0, 0}, B = {P1.X - Nx, P1.Y - Ny, 0, 1, Argb, 0, 0};
   FLionVertex C = {P2.X - Nx, P2.Y - Ny, 0, 1, Argb, 0, 0}, D = {P2.X + Nx, P2.Y + Ny, 0, 1, Argb, 0, 0};
-  EmitTri(A, B, C);
-  EmitTri(A, C, D);
+  EmitQuad(A, B, C, D);
 }
 
 void ULionRenderDevice::Draw2DPoint(FSceneNode* Frame, FPlane Color, DWORD LineFlags, FLOAT X1, FLOAT Y1, FLOAT X2, FLOAT Y2) {
@@ -411,8 +418,7 @@ void ULionRenderDevice::Draw2DPoint(FSceneNode* Frame, FPlane Color, DWORD LineF
   const DWORD Argb = PackColor(Color.X, Color.Y, Color.Z, 1.0f);
   FLionVertex A = {X1, Y1, 0, 1, Argb, 0, 0}, B = {X2, Y1, 0, 1, Argb, 0, 0};
   FLionVertex C = {X2, Y2, 0, 1, Argb, 0, 0}, D = {X1, Y2, 0, 1, Argb, 0, 0};
-  EmitTri(A, B, C);
-  EmitTri(A, C, D);
+  EmitQuad(A, B, C, D);
 }
 
 IMPLEMENT_CLASS(ULionRenderDevice);

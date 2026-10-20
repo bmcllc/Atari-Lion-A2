@@ -19,10 +19,27 @@ struct File {
 
 inline uint32_t sectors(size_t bytes) { return uint32_t((bytes + kSector - 1) / kSector); }
 
+// Directory record length for a file name (the ";1" version suffix included).
+inline uint32_t record_len(const File& f) {
+  const size_t n = f.name.size() + 2;
+  return uint32_t(33 + n + ((n & 1) ? 0 : 1));
+}
+
+// Sectors the root directory takes: "." and "..", then one record per file; a record never crosses a sector.
+inline uint32_t root_sectors(const std::vector<File>& files) {
+  uint32_t sectors = 1, used = 34 + 34;
+  for (const File& f : files) {
+    const uint32_t len = record_len(f);
+    if (used + len > kSector) ++sectors, used = 0;
+    used += len;
+  }
+  return sectors;
+}
+
 // LBA each file will get, in order.
 inline std::vector<uint32_t> layout(const std::vector<File>& files) {
   std::vector<uint32_t> lba;
-  uint32_t next = kFirstFileLba;
+  uint32_t next = kFirstFileLba + root_sectors(files) - 1;
   for (const File& f : files) {
     lba.push_back(next);
     next += std::max<uint32_t>(1, sectors(f.data.size()));
@@ -64,7 +81,8 @@ inline uint32_t record(uint8_t* p, uint32_t lba, uint32_t size, bool dir, const 
 inline std::vector<uint8_t> build(const std::string& volume, const std::vector<File>& files) {
   using namespace detail;
   const auto lba = layout(files);
-  uint32_t total = kFirstFileLba;
+  const uint32_t dir_sectors = root_sectors(files);
+  uint32_t total = kFirstFileLba + dir_sectors - 1;
   for (const File& f : files) total += std::max<uint32_t>(1, sectors(f.data.size()));
   std::vector<uint8_t> img(size_t(total) * kSector, 0);
   auto sec = [&](uint32_t n) { return &img[size_t(n) * kSector]; };
@@ -83,7 +101,7 @@ inline std::vector<uint8_t> build(const std::string& volume, const std::vector<F
   both32(pvd + 132, 10);  // path table: one 10-byte entry
   le32(pvd + 140, 18);
   be32(pvd + 148, 19);
-  record(pvd + 156, 20, kSector, true, std::string(1, '\0'));
+  record(pvd + 156, 20, dir_sectors * kSector, true, std::string(1, '\0'));
   text(pvd + 190, 128, volume);
   text(pvd + 318, 128, "ATARI");
   text(pvd + 446, 128, "ATARI LION MKDEMO");
@@ -111,9 +129,10 @@ inline std::vector<uint8_t> build(const std::string& volume, const std::vector<F
 
   // Root directory.
   uint8_t* dir = sec(20);
-  uint32_t off = record(dir, 20, kSector, true, std::string(1, '\0'));
-  off += record(dir + off, 20, kSector, true, std::string(1, '\1'));
+  uint32_t off = record(dir, 20, dir_sectors * kSector, true, std::string(1, '\0'));
+  off += record(dir + off, 20, dir_sectors * kSector, true, std::string(1, '\1'));
   for (size_t i = 0; i < files.size(); ++i) {
+    if (off + record_len(files[i]) > kSector) dir += kSector, off = 0;
     off += record(dir + off, lba[i], uint32_t(files[i].data.size()), false, files[i].name + ";1");
     std::copy(files[i].data.begin(), files[i].data.end(), sec(lba[i]));
   }

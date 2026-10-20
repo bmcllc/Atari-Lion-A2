@@ -9,7 +9,8 @@
 # level; maps are played as they are, and travel between them is the engine's (Teleporters, triggers, "open").
 # UNREAL_SRC is a checkout of https://github.com/RedPandaProjects/UnrealEngine (its Core and Engine are
 # patched in scratch copies; the checkout is never modified). Requires clang with the PowerPC target, ld.lld,
-# llvm-ar, llvm-nm, llvm-objcopy, python3 and a built `unrport`.
+# llvm-ar, llvm-nm, llvm-objcopy, python3 and a built `unrport`. UNRPORT_ELF=file keeps the linked client with its
+# symbols, so that `lion --profile` output can be named (see the README).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 map="${1:?usage: UNREAL_SRC=... build.sh Map.unr out.iso [options]}"
@@ -19,6 +20,7 @@ cache="${UNRPORT_CACHE:-build/unrport-core}"
 engine="$cache-engine"
 [[ -d "$cache/Inc" ]] || "$here/core/build_core.sh" "$src/Source/Core" "$cache"
 [[ -d "$engine/Inc" ]] || "$here/engine/build_engine.sh" "$src/Source/Engine" "$engine"
+python3 -I "$here/engine/patch_retail.py" "$engine"
 render="$cache-render"; sound="$cache-sound"; lion="$cache-liondrv"; fire="$cache-fire"
 if [[ ! -d "$render/Inc" ]]; then  # Render: smaller tables (patch_render.py), plus the for-scope fixes done by compile_pkg.sh
   mkdir -p "$render" && cp -r "$src/Source/Render/Inc" "$src/Source/Render/Src" "$render/"
@@ -75,6 +77,7 @@ with open(sys.argv[2], "w") as f:
 PY
 clang++ --target=powerpc-unknown-none-elf -mcpu=7400 -O2 -ffreestanding -fno-exceptions -fno-rtti -c "$tmp/exports.cpp" -o "$tmp/exports.o"
 link "$tmp/exports.o"
+[[ -n "${UNRPORT_ELF:-}" ]] && cp "$tmp/client.elf" "$UNRPORT_ELF"  # the linked client with its symbols, for lion --profile
 llvm-objcopy -O binary "$tmp/client.elf" "$tmp/client.bin"
 # The image (code, data, bss) must end below the log ring at 0x1F0000, where the RAM disc and heap's neighbours start.
 bss_end="$(llvm-size -A "$tmp/client.elf" | awk '$1 == ".bss" {print $3 + $2}')"
@@ -100,13 +103,19 @@ if ((${#extra_ini[@]})); then
     if [[ "$kv" == start=* ]]; then sed -i "s/^LocalMap=.*/LocalMap=${kv#start=}/" "$ini"; else echo "$kv" >> "$ini"; fi
   done
 fi
+if [[ -n "${UNRPORT_GAME:-}" && "$UNRPORT_GAME" != UNreal ]]; then  # retail name of the game package
+  [[ "$ini" == "$tmp/Lion.ini" ]] || { cp "$ini" "$tmp/Lion.ini"; ini="$tmp/Lion.ini"; }
+  sed -i "s/\bUNreal\b/$UNRPORT_GAME/g" "$ini"
+  if grep -q '^\[Lion\]' "$ini"; then sed -i '/^\[Lion\]/a Retail=1' "$ini"; else printf '\n[Lion]\nRetail=1\n' >> "$ini"; fi
+fi
 pack() {  # pack <out.iso> [extra unrport options]
   local iso="$1"; shift
   "${UNRPORT:-build/unrport}" "$map" "$tmp/client.bin" "$iso" "${opts[@]}" \
       --file "$ini" --file "$scripts/Core.u" --file "$scripts/Fire.u" --file "$scripts/IpDrv.u" \
       --file "$src/Engine/Localization/Core.int" --file "$src/Engine/Localization/Engine.int" \
-      --cdfile "$scripts/Engine.u" --cdfile "$scripts/Editor.u" --cdfile "$scripts/UNreal.u" "$@"
-}  # UNreal.u is the game (37 MB: scripts, meshes, textures, sounds), streamed from the CD
+      --cdfile "$scripts/Engine.u" --cdfile "$scripts/Editor.u" --cdfile "$scripts/${UNRPORT_GAME:-UNreal}.u" "$@"
+}  # UNreal.u is the game (37 MB: scripts, meshes, textures, sounds), streamed from the CD. UNRPORT_GAME=UnrealI picks the
+# retail name of the same package (retail maps import UnrealI; the file name is the package name).
 
 # Loading reads the disc in chunks, and every seek costs ~100 ms. The client records which chunks it touches and in
 # which order; a second packing lays them out in that order (PRELOAD.BIN) so loading reads long runs instead. The

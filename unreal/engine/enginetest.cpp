@@ -102,9 +102,16 @@ extern "C" void lion_census(const char* Tag) {
 // Called while a texture loads: whether to drop its top mipmap (see patch_engine.py). The first megabyte of
 // full-size textures is kept as it is; after that, large ones lose their top level and so three quarters of
 // their memory.
+extern INT GLionRetail;
 extern "C" int lion_drop_top_mip(UTexture* Texture) {
   static INT Kept;
   const INT Bytes = Texture->Mips(0).DataArray.Num();
+  // The retail levels bring hundreds of textures: the HUD and fonts stay whole, everything from 64x64 up is halved.
+  if (GLionRetail) {
+    if (Texture->USize < 64 && Texture->VSize < 64) return 0;
+    if (Kept + Bytes <= (1 << 17)) { Kept += Bytes; return 0; }
+    return 1;
+  }
   if (Texture->USize < 128 && Texture->VSize < 128) return 0;
   if (Kept + Bytes <= (1 << 20)) { Kept += Bytes; return 0; }
   return 1;

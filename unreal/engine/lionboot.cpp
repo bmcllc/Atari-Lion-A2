@@ -59,7 +59,10 @@ static void CheckExit() {
   Game->SetClientTravel(V, Next, 1, 0, TRAVEL_Relative);
 }
 
+INT GLionRetail;  // [Lion] Retail=1: read the retail game's version-61 packages (see patch_retail.py)
+
 extern "C" void lion_engine_boot() {
+  { char R[8] = "0"; GetConfigString("Lion", "Retail", R, sizeof(R)); GLionRetail = R[0] == '1'; }
   GSceneMem.Init(32768);
   GDynMem.Init(65536);
   UClass* EngineClass = GObj.LoadClass(UGameEngine::StaticClass, NULL, "ini:Engine.Engine.GameEngine", NULL, LOAD_NoFail | LOAD_KeepImports, NULL);

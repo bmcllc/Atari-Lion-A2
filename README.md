@@ -170,7 +170,7 @@ sons e música, também com `--cdfile`) começa por esse mapa em vez de `Entry`,
 Os Teleporters e gatilhos do próprio mapa fazem a troca pelo motor. Não há mapas originais neste repositório, então
 o caminho foi testado com uma cópia do `Entry.unr` (nível carregado do CD sem o construtor) e com a recarga do `Entry`.
 
-Estado: o jogo `UNreal.SinglePlayer` carrega do CD em cerca de 20 s de tempo emulado, o jogador `MaleOne` nasce no mapa
+Estado: o jogo `UNreal.SinglePlayer` carrega do CD em cerca de 10 s de tempo emulado (o nível está pronto aos 10 s), o jogador `MaleOne` nasce no mapa
 com o HUD e as armas do Unreal, e o jogo roda a 60 Hz com colisão, luz, som, combate com os monstros e entrada
 pelo controle. A tela mostra uma barra de carregamento vermelha enquanto o jogo é lido do CD. O jogo não está
 completo: são sete salas e não as fases originais (que não estão no repositório) e sem as sequências do jogo
@@ -194,16 +194,26 @@ carregamento de um nível silencia a música e ela retoma sozinha. O tocador foi
 saída do Tyke de uma execução sem tela.
 
 Tempo de carga: cada leitura do CD custa uns 100 ms de busca, e carregar o `UNreal.u` fazia mais de mil leituras
-espalhadas (cerca de 2 minutos). O `build.sh` agora roda o jogo uma vez no emulador (headless) para gravar quais blocos
+espalhadas (cerca de 2 minutos). O `build.sh` roda o jogo uma vez no emulador (headless) para gravar quais blocos
 de 4 KB do disco o jogo toca e em que ordem (`g_cd_trace`, em `lionrt.cpp`), e o `unrport --preload` grava esses
 blocos em sequência no disco (`PRELOAD.BIN`, nomeados em `PRELOAD.MAP`): a carga passa a ler o disco em corridas de
-128 KB. Os blocos que a gravação leu várias vezes ficam fixos na RAM (cerca de 1,4 MB). O rastro fica em
+512 KB. O diretório raiz do CD é lido de uma vez (cada busca custa ~100 ms, e procurar arquivo por arquivo custava uns
+8 s), e a carga não grava mais o rastro quando já há `PRELOAD.MAP`. Os blocos que a gravação leu várias vezes ficam fixos na RAM (cerca de 1,4 MB). O rastro fica em
 `build/<disco>.trace`; `UNRPORT_RETRACE=1` regrava.
 
 Memória e tempo: o heap tem 22 MB dos 24 MB (o jogo usa cerca de 19 MB); o `Engine.u` e o `Editor.u` vêm do CD, que tem
 um cache de blocos compartilhado. Quando o heap aperta, o jogo coleta lixo e esvazia o cache de áudio. O relógio do
 jogo é o contador de quadros do vídeo: cada tick avança o mundo pelos quadros de 60 Hz que passaram (de 1 a 6) e
 espera o próximo vblank quando termina cedo.
+
+Mapas do jogo retail: `unreal/build_retail.sh <pasta do CD extraído> [Mapa.unr] [saída.iso]` monta um disco que joga uma fase
+original do CD do Unreal (a pasta tem `Maps/ Textures/ Sounds/ Music/ System200/`; o CD é seu, nada dele entra no
+repositório). Os pacotes `.u` em versão 61 do CD (`System200/`) são lidos pelo motor com `[Lion] Retail=1`: os arquivos
+retail guardam a esfera de bounds só com o centro, e `engine/patch_retail.py` troca esse formato em tempo de execução, além
+de cortar memória (os polígonos de editor dos brushes não são carregados, o rastreador de brushes móveis não dobra os
+bancos de BSP, as texturas grandes perdem o nível de mip mais alto e, quando a fase sobe, o pré-carregamento do CD é
+devolvido ao heap). O alocador ganhou oito classes de tamanho por oitava e divide os blocos livres grandes. A Vortex2
+carrega em cerca de 14,5 s emulados e roda a 60 Hz com 17 MB do heap em uso.
 
 Como funciona (`unreal/`):
 - `core/build_core.sh` e `engine/build_engine.sh` copiam Core e Engine do checkout e aplicam `patch_core.py` /
@@ -229,6 +239,12 @@ UNREAL_SRC=/caminho/para/UnrealEngine unreal/build.sh $UNREAL_SRC/Engine/Maps/En
 ```bash
 ./build/lion --fast-boot --scale 3 build/unreal.iso
 ```
+
+Desempenho: `lion --headless --profile perfil.txt [--profile-from N]` grava, por endereço, as instruções e os ciclos
+executados pelo Tuffy (a partir do quadro N). Para dar nome aos endereços, `UNRPORT_ELF=build/client.elf unreal/build.sh`
+guarda o cliente linkado com seus símbolos (`llvm-nm -n client.elf` gera a tabela). A renderização usa `SPIKE` com o comando
+de quadrilátero (`Spike::kQuad`): dois triângulos em 19 palavras, em vez de 42. O tempo real depende do computador: nas
+cenas com muitos monstros o emulador roda abaixo do tempo real, porque o Tuffy interpreta a renderização do Unreal.
 
 O log do motor fica na RAM em `0x001F0000` (`./build/lion --headless --frames 1200 --dump-ram log.bin,1F0000,20000
 disco.iso`; os 4 primeiros bytes são o tamanho). `--until-log "texto|outro"` encerra a execução headless assim que o log

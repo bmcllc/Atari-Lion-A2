@@ -120,7 +120,24 @@ static const char* LoadIni(const char* FileName) {
   return Text;
 }
 // Finds the line after "[Section]"; returns NULL if the section does not exist.
+static const char* FindSectionUncached(const char* Ini, const char* Section);
+// The localization files are searched for every string the engine localizes: the last few lookups are kept.
 static const char* FindSection(const char* Ini, const char* Section) {
+  struct Entry { const char* Ini; char Section[48]; const char* Found; };
+  static Entry Cache[8];
+  static INT Next;
+  for (INT i = 0; i < ARRAY_COUNT(Cache); ++i)
+    if (Cache[i].Ini == Ini && !appStrcmp(Cache[i].Section, Section)) return Cache[i].Found;
+  const char* Found = FindSectionUncached(Ini, Section);
+  if (appStrlen(Section) < sizeof(Cache[0].Section)) {
+    Entry& E = Cache[Next++ % ARRAY_COUNT(Cache)];
+    E.Ini = Ini;
+    appStrncpy(E.Section, Section, sizeof(E.Section));
+    E.Found = Found;
+  }
+  return Found;
+}
+static const char* FindSectionUncached(const char* Ini, const char* Section) {
   INT n = appStrlen(Section);
   for (const char* p = Ini; *p;) {
     if (*p == '[' && !appStrnicmp(p + 1, Section, n) && p[1 + n] == ']') {
